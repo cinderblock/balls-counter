@@ -1,0 +1,30 @@
+{
+  "streams": [
+    {
+      "name": "red-outlet",
+      "source": "samples/red/sample1-goal.mp4",
+      "mode": "outlet",
+      "line": [[349, 386], [522, 363]],
+      "ball_area": 900,
+      "band_width": 20,
+      "min_peak": 0,
+      "fall_ratio": 0.5
+    },
+    {
+      "name": "red-inlet",
+      "source": "samples/red/sample1-goal.mp4",
+      "mode": "inlet",
+      "roi_points": [[339, 202], [329, 265], [358, 292], [400, 256], [415, 175], [388, 158]],
+      "ball_area": 900,
+      "band_width": 10
+    },
+    {
+      "name": "blue-inlet",
+      "source": "samples/blue/sample1-goal.mp4",
+      "mode": "inlet",
+      "roi_points": [[207, 421], [256, 378], [290, 408], [279, 494], [240, 533], [210, 507]],
+      "ball_area": 1100,
+      "band_width": 10
+    }
+  ]
+}
