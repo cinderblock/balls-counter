@@ -1038,7 +1038,7 @@ def create_app(state: AppState) -> FastAPI:
       fetch('/api/clip/save', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{goal: name}})}})
         .then(r => r.json())
         .then(d => {{
-          btn.textContent = d.ok ? `Saved (${d.n_frames}f)` : 'Error';
+          btn.textContent = d.ok ? `Saved (${{d.n_frames}}f)` : 'Error';
           setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Save clip'; }}, 3000);
         }})
         .catch(() => {{
