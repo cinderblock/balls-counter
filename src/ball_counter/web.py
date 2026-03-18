@@ -217,6 +217,16 @@ class AppState:
                 pass
 
 
+def _load_reviewers(clips_dir: Path) -> dict:
+    rf = clips_dir / "reviewers.json"
+    return json.loads(rf.read_text()) if rf.exists() else {}
+
+
+def _save_reviewers(clips_dir: Path, reviewers: dict) -> None:
+    rf = clips_dir / "reviewers.json"
+    rf.write_text(json.dumps(reviewers, indent=2))
+
+
 _WIZARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -945,6 +955,606 @@ fetch('/api/wizard/config-path').then(r=>r.json()).then(d => {
 </html>"""
 
 
+_REVIEW_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Ball Counter — Review</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#eee;font-family:sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+a{color:#7bf;text-decoration:none}
+a:hover{text-decoration:underline}
+/* nav */
+#nav{display:flex;align-items:center;gap:0;background:#1a1a1a;border-bottom:1px solid #333;padding:0 1rem;height:42px;flex-shrink:0}
+#nav .brand{font-size:0.95rem;font-weight:bold;color:#aaa;margin-right:1.2rem}
+#nav .tab{padding:0 0.9rem;height:42px;display:flex;align-items:center;font-size:0.88rem;color:#888;cursor:pointer;border-bottom:2px solid transparent}
+#nav .tab:hover{color:#ccc}
+#nav .tab.active{color:#7bf;border-bottom-color:#7bf}
+#nav .reviewer-bar{margin-left:auto;display:flex;align-items:center;gap:0.5rem;font-size:0.82rem}
+#reviewer-select{background:#222;border:1px solid #444;color:#ccc;border-radius:4px;padding:0.25rem 0.5rem;font-size:0.82rem}
+/* layout */
+#main{display:flex;flex:1;overflow:hidden}
+/* clip list */
+#clip-list-panel{width:270px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid #333;background:#161616}
+#clip-list-header{padding:0.5rem;border-bottom:1px solid #2a2a2a;display:flex;flex-direction:column;gap:0.4rem}
+#clip-search{width:100%;background:#1e1e1e;border:1px solid #333;color:#ccc;border-radius:4px;padding:0.3rem 0.5rem;font-size:0.82rem}
+#clip-filter{width:100%;background:#1e1e1e;border:1px solid #333;color:#ccc;border-radius:4px;padding:0.3rem 0.5rem;font-size:0.82rem}
+#clip-list{flex:1;overflow-y:auto}
+.clip-item{padding:0.45rem 0.6rem;border-bottom:1px solid #222;cursor:pointer;display:flex;flex-direction:column;gap:0.15rem}
+.clip-item:hover{background:#1e1e1e}
+.clip-item.active{background:#1a2a3a;border-left:3px solid #7bf}
+.clip-goal{font-size:0.85rem;font-weight:bold}
+.clip-meta{font-size:0.75rem;color:#777;display:flex;gap:0.5rem;flex-wrap:wrap}
+.clip-badge{font-size:0.7rem;padding:0.1rem 0.35rem;border-radius:3px;margin-top:0.1rem;width:fit-content}
+.badge-annotated{background:#1a3a1a;color:#5d5;border:1px solid #3a3}
+.badge-unannotated{background:#2a2a2a;color:#888;border:1px solid #444}
+/* player */
+#player-panel{flex:1;overflow-y:auto;padding:0.8rem 1rem}
+#clip-header{margin-bottom:0.5rem;display:flex;align-items:baseline;gap:0.8rem;flex-wrap:wrap}
+#clip-title{font-size:1rem;font-weight:bold}
+#clip-subtitle{font-size:0.8rem;color:#888}
+video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px}
+/* timeline */
+#timeline-wrap{position:relative;margin:0.4rem 0}
+#timeline{width:100%;height:60px;display:block;cursor:crosshair;background:#1a1a1a;border-radius:4px}
+#autospeed-btn{position:absolute;top:4px;right:6px;font-size:0.72rem;padding:0.15rem 0.4rem;background:#1a1a1a88;border:1px solid #555;color:#aaa;cursor:pointer;border-radius:3px}
+#autospeed-btn.on{background:#1a3a1a88;border-color:#3a3;color:#8f8}
+/* events row */
+#events-row{display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;margin:0.4rem 0;font-size:0.8rem}
+#events-label{color:#888;flex-shrink:0}
+.event-btn{padding:0.2rem 0.5rem;font-size:0.78rem;background:#2a2a2a;border:1px solid #444;color:#ccc;border-radius:3px;cursor:pointer}
+.event-btn:hover{background:#3a3a3a}
+#next-unannotated{margin-left:auto;padding:0.2rem 0.6rem;font-size:0.78rem;background:#1a2a3a;border:1px solid #38a;color:#8cf;border-radius:3px;cursor:pointer}
+#next-unannotated:hover{background:#1e3a50}
+/* annotations */
+#anno-section{margin-top:0.6rem;border-top:1px solid #2a2a2a;padding-top:0.6rem}
+.anno-controls{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem}
+#n-balls-input{width:60px;background:#1e1e1e;border:1px solid #444;color:#eee;border-radius:4px;padding:0.3rem 0.5rem;font-size:0.9rem}
+.anno-btn{padding:0.3rem 0.7rem;font-size:0.82rem;background:#1a3a5c;border:1px solid #38a;color:#8cf;border-radius:4px;cursor:pointer}
+.anno-btn:hover{background:#1e4a6c}
+.anno-btn.danger{background:#3a1a1a;border-color:#a33;color:#f88}
+.anno-btn.danger:hover{background:#4a2020}
+.save-btn{background:#1a4a1a;border-color:#3a3;color:#8f8}
+.save-btn:hover{background:#1e5a1e}
+#my-marks{margin-top:0.4rem}
+#my-marks-list{list-style:none;display:flex;flex-direction:column;gap:0.25rem}
+.mark-item{display:flex;align-items:center;gap:0.5rem;font-size:0.8rem;padding:0.2rem 0.4rem;background:#1a1a1a;border-radius:3px}
+.mark-time{color:#7bf;cursor:pointer;min-width:50px}
+.mark-time:hover{text-decoration:underline}
+.mark-n{color:#fc8;min-width:20px}
+.mark-ts{color:#555;font-size:0.72rem;flex:1}
+.mark-del{background:none;border:none;color:#633;cursor:pointer;font-size:0.85rem;padding:0 0.2rem}
+.mark-del:hover{color:#f44}
+#other-reviewers{margin-top:0.6rem}
+#other-reviewers h4{font-size:0.78rem;color:#666;margin-bottom:0.3rem}
+.other-mark-item{display:flex;align-items:center;gap:0.5rem;font-size:0.78rem;padding:0.15rem 0.4rem;background:#141414;border-radius:3px;margin-bottom:0.2rem}
+.other-mark-time{color:#8af;cursor:pointer;min-width:50px}
+.other-mark-time:hover{text-decoration:underline}
+/* agreement */
+#agreement-section{margin-top:0.6rem;border-top:1px solid #2a2a2a;padding-top:0.6rem;display:none}
+#agreement-section h3{font-size:0.82rem;color:#888;margin-bottom:0.4rem}
+#agreement-table{border-collapse:collapse;font-size:0.78rem;width:100%}
+#agreement-table th,#agreement-table td{padding:0.2rem 0.5rem;border:1px solid #2a2a2a;text-align:left}
+#agreement-table th{background:#1a1a1a;color:#888}
+/* download row */
+#download-row{margin-top:0.6rem;display:flex;align-items:center;gap:0.8rem;font-size:0.8rem;color:#888}
+/* empty state */
+#empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:1rem}
+/* modal */
+#modal-overlay{display:none;position:fixed;inset:0;background:#0009;z-index:100;align-items:center;justify-content:center}
+#modal-overlay.show{display:flex}
+#modal-box{background:#1e1e1e;border:1px solid #444;border-radius:8px;padding:1.4rem;min-width:300px;max-width:400px}
+#modal-box h2{font-size:1rem;margin-bottom:0.8rem;color:#ccc}
+#reviewer-name-input{width:100%;background:#141414;border:1px solid #444;color:#eee;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.95rem;margin-bottom:0.6rem}
+.modal-row{display:flex;gap:0.5rem;justify-content:flex-end}
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<div id="nav">
+  <span class="brand"><a href="/">Ball Counter</a></span>
+  <div class="tab" onclick="window.location='/'">Live</div>
+  <div class="tab active">Review</div>
+  <div class="reviewer-bar">
+    <span style="color:#666">Reviewer:</span>
+    <select id="reviewer-select" onchange="onReviewerChange()">
+      <option value="">-- select --</option>
+    </select>
+    <button style="font-size:0.78rem;padding:0.2rem 0.5rem" onclick="showModal()">+ New</button>
+  </div>
+</div>
+
+<!-- Main -->
+<div id="main">
+
+  <!-- Clip List -->
+  <div id="clip-list-panel">
+    <div id="clip-list-header">
+      <input id="clip-search" type="text" placeholder="Search clips..." oninput="renderClipList()"/>
+      <select id="clip-filter" onchange="renderClipList()">
+        <option value="all">All clips</option>
+        <option value="annotated">Annotated by me</option>
+        <option value="unannotated">Unannotated by me</option>
+      </select>
+    </div>
+    <div id="clip-list"></div>
+  </div>
+
+  <!-- Player Panel -->
+  <div id="player-panel">
+    <div id="empty-state">Select a clip to review</div>
+    <div id="player-content" style="display:none">
+      <div id="clip-header">
+        <span id="clip-title"></span>
+        <span id="clip-subtitle"></span>
+      </div>
+      <video id="video" controls></video>
+      <div id="timeline-wrap">
+        <canvas id="timeline"></canvas>
+        <button id="autospeed-btn" onclick="toggleAutoSpeed()">Auto-speed: OFF</button>
+      </div>
+      <div id="events-row">
+        <span id="events-label">Events:</span>
+        <span id="events-btns"></span>
+        <button id="next-unannotated" onclick="nextUnannotated()">Next unannotated ]</button>
+      </div>
+      <div id="anno-section">
+        <div class="anno-controls">
+          <input id="n-balls-input" type="number" min="1" max="9" value="1" title="Number of balls"/>
+          <button class="anno-btn" onclick="markScore()">Mark score [Space]</button>
+          <button class="anno-btn danger" onclick="undoMark()">Undo</button>
+          <button class="anno-btn save-btn" onclick="saveAnnotations()">Save</button>
+        </div>
+        <div id="my-marks">
+          <div style="font-size:0.78rem;color:#666;margin-bottom:0.2rem">My marks:</div>
+          <ul id="my-marks-list"></ul>
+        </div>
+        <div id="other-reviewers"></div>
+      </div>
+      <div id="agreement-section">
+        <h3>Agreement</h3>
+        <table id="agreement-table"></table>
+      </div>
+      <div id="download-row">
+        <a id="download-link" href="#">Download zip</a>
+        <span style="color:#555">Shortcuts: Space=mark &nbsp; ]/[=next/prev unannotated &nbsp; ←/→=seek 2s &nbsp; 1-9=balls</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Reviewer modal -->
+<div id="modal-overlay">
+  <div id="modal-box">
+    <h2>Create Reviewer</h2>
+    <input id="reviewer-name-input" type="text" placeholder="Your name..." maxlength="64"/>
+    <div class="modal-row">
+      <button onclick="hideModal()">Cancel</button>
+      <button class="anno-btn" onclick="createReviewer()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── state ─────────────────────────────────────────────────────────────────────
+let allClips = [];
+let reviewers = {};
+let currentClip = null;   // sidecar JSON
+let myToken = null;
+let myMarks = [];         // [{video_time, frame_idx, timestamp, n_balls}]
+let autoSpeed = false;
+let timelineRAF = null;
+
+// ── init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  myToken = getCookie('reviewer_token') || null;
+  await loadReviewers();
+  await loadClips();
+  renderClipList();
+  if (location.hash) {
+    const id = location.hash.slice(1);
+    const clip = allClips.find(c => c.id === id);
+    if (clip) openClip(id);
+  }
+}
+
+// ── reviewers ─────────────────────────────────────────────────────────────────
+async function loadReviewers() {
+  const r = await fetch('/api/reviewers');
+  reviewers = await r.json();
+  const sel = document.getElementById('reviewer-select');
+  sel.innerHTML = '<option value="">-- select --</option>';
+  for (const [token, info] of Object.entries(reviewers)) {
+    const opt = document.createElement('option');
+    opt.value = token;
+    opt.textContent = info.label;
+    sel.appendChild(opt);
+  }
+  if (myToken && reviewers[myToken]) {
+    sel.value = myToken;
+  } else if (Object.keys(reviewers).length === 0) {
+    showModal();
+  }
+}
+
+function onReviewerChange() {
+  const sel = document.getElementById('reviewer-select');
+  myToken = sel.value || null;
+  if (myToken) setCookie('reviewer_token', myToken, 365);
+  if (currentClip) openClip(currentClip.id);
+}
+
+async function createReviewer() {
+  const label = document.getElementById('reviewer-name-input').value.trim();
+  if (!label) return;
+  const r = await fetch('/api/reviewer/create', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({label})
+  });
+  const data = await r.json();
+  myToken = data.token;
+  setCookie('reviewer_token', myToken, 365);
+  hideModal();
+  await loadReviewers();
+  if (currentClip) openClip(currentClip.id);
+}
+
+function showModal() { document.getElementById('modal-overlay').classList.add('show'); }
+function hideModal() { document.getElementById('modal-overlay').classList.remove('show'); }
+
+// ── clips ──────────────────────────────────────────────────────────────────────
+async function loadClips() {
+  const r = await fetch('/api/clips');
+  allClips = await r.json();
+}
+
+function renderClipList() {
+  const search = document.getElementById('clip-search').value.toLowerCase();
+  const filter = document.getElementById('clip-filter').value;
+  const list = document.getElementById('clip-list');
+  list.innerHTML = '';
+  const filtered = allClips.filter(c => {
+    if (search && !c.id.toLowerCase().includes(search) && !c.goal.toLowerCase().includes(search)) return false;
+    if (filter === 'annotated' && !(myToken && c.annotators.includes(myToken))) return false;
+    if (filter === 'unannotated' && myToken && c.annotators.includes(myToken)) return false;
+    return true;
+  });
+  for (const clip of filtered) {
+    const div = document.createElement('div');
+    div.className = 'clip-item' + (currentClip && currentClip.id === clip.id ? ' active' : '');
+    div.dataset.id = clip.id;
+    const goalColor = clip.goal.includes('red') ? '#e55' : (clip.goal.includes('blue') ? '#5af' : '#aaa');
+    const annotated = myToken && clip.annotators.includes(myToken);
+    const dur = clip.duration ? clip.duration.toFixed(1) + 's' : '';
+    div.innerHTML =
+      '<div class="clip-goal" style="color:' + goalColor + '">' + esc(clip.goal) + '</div>' +
+      '<div class="clip-meta">' +
+        '<span>' + esc(clip.saved_at || clip.id) + '</span>' +
+        (dur ? '<span>' + dur + '</span>' : '') +
+        '<span>' + clip.n_events + ' events</span>' +
+      '</div>' +
+      '<div class="clip-badge ' + (annotated ? 'badge-annotated' : 'badge-unannotated') + '">' +
+        (annotated ? '&#x2713; annotated' : '&#x25cb; unannotated') +
+      '</div>';
+    div.onclick = () => openClip(clip.id);
+    list.appendChild(div);
+  }
+}
+
+// ── open clip ─────────────────────────────────────────────────────────────────
+async function openClip(id) {
+  const r = await fetch('/api/clips/' + id);
+  if (!r.ok) return;
+  currentClip = await r.json();
+  location.hash = id;
+  myMarks = [];
+  if (myToken && currentClip.annotations && currentClip.annotations[myToken]) {
+    myMarks = currentClip.annotations[myToken].marks || [];
+  }
+
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('player-content').style.display = 'block';
+
+  // header
+  const goalColor = currentClip.goal.includes('red') ? '#e55' : (currentClip.goal.includes('blue') ? '#5af' : '#aaa');
+  document.getElementById('clip-title').innerHTML = '<span style="color:' + goalColor + '">' + esc(currentClip.goal) + '</span>';
+  const dur = currentClip.duration ? ' &nbsp; ' + currentClip.duration.toFixed(1) + 's' : '';
+  const nevt = ' &nbsp; ' + (currentClip.events ? currentClip.events.length : 0) + ' events';
+  document.getElementById('clip-subtitle').innerHTML = esc(currentClip.saved_at || id) + dur + nevt;
+
+  // video
+  const video = document.getElementById('video');
+  video.src = '/api/clips/' + id + '/video';
+  video.load();
+
+  // timeline
+  drawTimeline();
+  video.ontimeupdate = () => drawTimeline();
+
+  // autospeed
+  if (autoSpeed) { video.playbackRate = 1; autoSpeed = false; updateAutoSpeedBtn(); }
+
+  // events row
+  renderEventsRow();
+
+  // marks
+  renderMyMarks();
+  renderOtherReviewers();
+
+  // agreement
+  loadAgreement();
+
+  // download link
+  document.getElementById('download-link').href = '/api/clips/' + id + '/download';
+
+  // highlight in list
+  document.querySelectorAll('.clip-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === id);
+  });
+}
+
+// ── timeline ──────────────────────────────────────────────────────────────────
+function drawTimeline() {
+  const canvas = document.getElementById('timeline');
+  const video = document.getElementById('video');
+  if (!currentClip) return;
+  const W = canvas.offsetWidth; const H = 60;
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const signal = currentClip.signal || [];
+  const fps = currentClip.fps || 30;
+  const nFrames = currentClip.n_frames || (signal.length > 0 ? signal.length : 1);
+  const dur = nFrames / fps;
+
+  // signal fill
+  if (signal.length > 1) {
+    const maxSig = Math.max(...signal, 1);
+    ctx.fillStyle = '#1a4a1a';
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let i = 0; i < signal.length; i++) {
+      const x = (i / (signal.length - 1)) * W;
+      const y = H - (signal[i] / maxSig) * H * 0.9;
+      if (i === 0) ctx.lineTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // auto-detected events (red lines)
+  if (currentClip.events) {
+    ctx.strokeStyle = '#e44';
+    ctx.lineWidth = 1.5;
+    for (const ev of currentClip.events) {
+      const t = ev.frame_idx != null ? ev.frame_idx / fps : (ev.video_time || 0);
+      const x = (t / dur) * W;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+  }
+
+  // my marks (blue lines)
+  ctx.strokeStyle = '#36f';
+  ctx.lineWidth = 1.5;
+  for (const m of myMarks) {
+    const t = m.video_time || 0;
+    const x = (t / dur) * W;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+
+  // current time (yellow)
+  if (video.duration) {
+    const x = (video.currentTime / video.duration) * W;
+    ctx.strokeStyle = '#ff0';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('timeline').addEventListener('click', e => {
+    const video = document.getElementById('video');
+    if (!video.duration) return;
+    const canvas = document.getElementById('timeline');
+    const rect = canvas.getBoundingClientRect();
+    const frac = (e.clientX - rect.left) / rect.width;
+    video.currentTime = frac * video.duration;
+    drawTimeline();
+  });
+});
+
+// ── auto-speed ────────────────────────────────────────────────────────────────
+function toggleAutoSpeed() {
+  autoSpeed = !autoSpeed;
+  updateAutoSpeedBtn();
+}
+
+function updateAutoSpeedBtn() {
+  const btn = document.getElementById('autospeed-btn');
+  btn.textContent = 'Auto-speed: ' + (autoSpeed ? 'ON' : 'OFF');
+  btn.classList.toggle('on', autoSpeed);
+}
+
+// Poll every 100ms for auto-speed logic
+setInterval(() => {
+  if (!autoSpeed || !currentClip) return;
+  const video = document.getElementById('video');
+  if (!video.duration) return;
+  const fps = currentClip.fps || 30;
+  const signal = currentClip.signal || [];
+  const frameIdx = Math.round(video.currentTime * fps);
+  const sig = signal[Math.min(frameIdx, signal.length - 1)] || 0;
+  video.playbackRate = sig < 30 ? 4 : 1;
+}, 100);
+
+// ── events row ────────────────────────────────────────────────────────────────
+function renderEventsRow() {
+  const container = document.getElementById('events-btns');
+  container.innerHTML = '';
+  if (!currentClip || !currentClip.events) return;
+  const fps = currentClip.fps || 30;
+  currentClip.events.forEach((ev, i) => {
+    const t = ev.frame_idx != null ? ev.frame_idx / fps : (ev.video_time || 0);
+    const btn = document.createElement('button');
+    btn.className = 'event-btn';
+    btn.textContent = '+ ' + (ev.n_balls || '?') + ' @ ' + t.toFixed(1) + 's';
+    btn.onclick = () => { document.getElementById('video').currentTime = Math.max(0, t - 1); };
+    container.appendChild(btn);
+  });
+}
+
+// ── marks ──────────────────────────────────────────────────────────────────────
+function markScore() {
+  if (!currentClip) return;
+  const video = document.getElementById('video');
+  const n = parseInt(document.getElementById('n-balls-input').value) || 1;
+  const fps = currentClip.fps || 30;
+  const frameIdx = Math.round(video.currentTime * fps);
+  const now = new Date().toISOString();
+  myMarks.push({video_time: video.currentTime, frame_idx: frameIdx, timestamp: now, n_balls: n});
+  renderMyMarks();
+  drawTimeline();
+}
+
+function undoMark() {
+  myMarks.pop();
+  renderMyMarks();
+  drawTimeline();
+}
+
+function renderMyMarks() {
+  const ul = document.getElementById('my-marks-list');
+  ul.innerHTML = '';
+  myMarks.forEach((m, i) => {
+    const li = document.createElement('li');
+    li.className = 'mark-item';
+    li.innerHTML =
+      '<span class="mark-time" onclick="seekTo(' + m.video_time + ')">' + m.video_time.toFixed(2) + 's</span>' +
+      '<span class="mark-n">' + m.n_balls + 'b</span>' +
+      '<span class="mark-ts">' + esc(m.timestamp) + '</span>' +
+      '<button class="mark-del" onclick="deleteMark(' + i + ')">&#x2715;</button>';
+    ul.appendChild(li);
+  });
+}
+
+function deleteMark(i) {
+  myMarks.splice(i, 1);
+  renderMyMarks();
+  drawTimeline();
+}
+
+function renderOtherReviewers() {
+  const container = document.getElementById('other-reviewers');
+  container.innerHTML = '';
+  if (!currentClip || !currentClip.annotations) return;
+  for (const [token, anno] of Object.entries(currentClip.annotations)) {
+    if (token === myToken) continue;
+    const label = (reviewers[token] && reviewers[token].label) || token;
+    const marks = anno.marks || [];
+    if (marks.length === 0) continue;
+    const h = document.createElement('div');
+    h.innerHTML = '<h4>' + esc(label) + ' (' + marks.length + ' marks)</h4>';
+    container.appendChild(h);
+    for (const m of marks) {
+      const div = document.createElement('div');
+      div.className = 'other-mark-item';
+      div.innerHTML =
+        '<span class="other-mark-time" onclick="seekTo(' + (m.video_time || 0) + ')">' + (m.video_time || 0).toFixed(2) + 's</span>' +
+        '<span style="color:#fc8;min-width:20px">' + m.n_balls + 'b</span>' +
+        '<span style="color:#555;font-size:0.72rem">' + esc(m.timestamp || '') + '</span>';
+      container.appendChild(div);
+    }
+  }
+}
+
+async function saveAnnotations() {
+  if (!currentClip || !myToken) { alert('Select a reviewer first.'); return; }
+  const label = (reviewers[myToken] && reviewers[myToken].label) || myToken;
+  const r = await fetch('/api/clips/' + currentClip.id + '/annotations', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({token: myToken, label, marks: myMarks})
+  });
+  if (r.ok) {
+    // refresh clip list to update annotators
+    await loadClips();
+    renderClipList();
+    const idx = allClips.findIndex(c => c.id === currentClip.id);
+    if (idx >= 0 && !allClips[idx].annotators.includes(myToken)) allClips[idx].annotators.push(myToken);
+    renderClipList();
+  } else {
+    alert('Save failed: ' + (await r.text()));
+  }
+}
+
+// ── agreement ─────────────────────────────────────────────────────────────────
+async function loadAgreement() {
+  if (!currentClip) return;
+  const r = await fetch('/api/clips/' + currentClip.id + '/agreement');
+  if (!r.ok) return;
+  const data = await r.json();
+  if (!data.reviewers || data.reviewers.length < 2 || !data.events || data.events.length === 0) {
+    document.getElementById('agreement-section').style.display = 'none';
+    return;
+  }
+  document.getElementById('agreement-section').style.display = 'block';
+  const table = document.getElementById('agreement-table');
+  const rLabels = data.reviewers.map(t => (reviewers[t] && reviewers[t].label) || t);
+  let html = '<thead><tr><th>Event</th>' + rLabels.map(l => '<th>' + esc(l) + '</th>').join('') + '</tr></thead><tbody>';
+  data.events.forEach((ev, i) => {
+    html += '<tr><td>' + (ev.time != null ? ev.time.toFixed(1) + 's' : '?') + '</td>';
+    for (const t of data.reviewers) {
+      const hit = ev.reviewers && ev.reviewers[t];
+      html += '<td style="color:' + (hit ? '#5d5' : '#555') + '">' + (hit ? '&#x2713;' : '&#x25cb;') + '</td>';
+    }
+    html += '</tr>';
+  });
+  html += '</tbody>';
+  table.innerHTML = html;
+}
+
+// ── next unannotated ──────────────────────────────────────────────────────────
+async function nextUnannotated() {
+  const r = await fetch('/api/clips/random?annotated=false&reviewer=' + (myToken || ''));
+  if (!r.ok) return;
+  const data = await r.json();
+  if (data.id) openClip(data.id);
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+function seekTo(t) { document.getElementById('video').currentTime = t; }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function getCookie(name) {
+  const m = document.cookie.match('(?:^|;)\\s*' + name + '=([^;]*)');
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function setCookie(name, val, days) {
+  const d = new Date(); d.setTime(d.getTime() + days*86400000);
+  document.cookie = name + '=' + encodeURIComponent(val) + ';expires=' + d.toUTCString() + ';path=/';
+}
+
+// ── keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  const video = document.getElementById('video');
+  if (e.code === 'Space') { e.preventDefault(); markScore(); }
+  else if (e.code === 'BracketRight') { e.preventDefault(); nextUnannotated(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 2); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); video.currentTime = Math.min(video.duration||0, video.currentTime + 2); }
+  else if (e.key >= '1' && e.key <= '9') { document.getElementById('n-balls-input').value = e.key; }
+});
+
+init();
+</script>
+</body>
+</html>"""
+
+
 def create_app(state: AppState) -> FastAPI:
     app = FastAPI(title="Ball Counter API")
 
@@ -1167,6 +1777,197 @@ def create_app(state: AppState) -> FastAPI:
             generator(),
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
+
+    # ------------------------------------------------------------------ review
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review():
+        if _wizard_active():
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse("/wizard")
+        return HTMLResponse(_REVIEW_HTML)
+
+    @app.get("/api/reviewers")
+    def api_reviewers():
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            return {}
+        return _load_reviewers(clips_dir)
+
+    @app.post("/api/reviewer/create")
+    def api_reviewer_create(body: dict):
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        label = (body.get("label") or "").strip()
+        if not label:
+            raise HTTPException(status_code=400, detail="label is required")
+        reviewers = _load_reviewers(clips_dir)
+        token = str(uuid.uuid4()).replace("-", "")
+        from datetime import datetime as _datetime
+        reviewers[token] = {"label": label, "created_at": _datetime.utcnow().isoformat() + "Z"}
+        _save_reviewers(clips_dir, reviewers)
+        return {"token": token, "label": label}
+
+    @app.get("/api/clips")
+    def api_clips():
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            return []
+        result = []
+        seen_stems = set()
+        for mp4 in sorted(clips_dir.glob("*.mp4"), key=lambda p: p.name, reverse=True):
+            stem = mp4.stem
+            if stem == "reviewers":
+                continue
+            jsn = clips_dir / (stem + ".json")
+            if not jsn.exists():
+                continue
+            seen_stems.add(stem)
+            try:
+                data = json.loads(jsn.read_text())
+            except Exception:
+                data = {}
+            n_frames = data.get("n_frames") or 0
+            fps = data.get("fps") or 30.0
+            duration = n_frames / fps if n_frames and fps else None
+            events = data.get("events") or []
+            captures = data.get("captures") or []
+            annotations = data.get("annotations") or {}
+            annotators = list(annotations.keys())
+            result.append({
+                "id": stem,
+                "goal": data.get("goal") or stem,
+                "saved_at": data.get("saved_at") or stem,
+                "fps": fps,
+                "n_frames": n_frames,
+                "duration": duration,
+                "n_events": len(events),
+                "n_captures": len(captures),
+                "annotators": annotators,
+            })
+        return result
+
+    @app.get("/api/clips/random")
+    def api_clips_random(reviewer: str = "", annotated: str = "false"):
+        import random as _random
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        want_annotated = annotated.lower() == "true"
+        candidates = []
+        for mp4 in clips_dir.glob("*.mp4"):
+            stem = mp4.stem
+            jsn = clips_dir / (stem + ".json")
+            if not jsn.exists():
+                continue
+            try:
+                data = json.loads(jsn.read_text())
+            except Exception:
+                data = {}
+            annotations = data.get("annotations") or {}
+            is_annotated = reviewer in annotations if reviewer else bool(annotations)
+            if want_annotated == is_annotated:
+                candidates.append(stem)
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No matching clips")
+        return {"id": _random.choice(candidates)}
+
+    @app.get("/api/clips/{clip_id}")
+    def api_clip_detail(clip_id: str):
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        jsn = clips_dir / (clip_id + ".json")
+        if not jsn.exists():
+            raise HTTPException(status_code=404, detail="Clip not found")
+        return json.loads(jsn.read_text())
+
+    @app.get("/api/clips/{clip_id}/video")
+    def api_clip_video(clip_id: str):
+        from starlette.responses import FileResponse as _FileResponse
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        mp4 = clips_dir / (clip_id + ".mp4")
+        if not mp4.exists():
+            raise HTTPException(status_code=404, detail="Video not found")
+        return _FileResponse(str(mp4), media_type="video/mp4")
+
+    @app.get("/api/clips/{clip_id}/download")
+    def api_clip_download(clip_id: str):
+        import io
+        import zipfile
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        mp4 = clips_dir / (clip_id + ".mp4")
+        jsn = clips_dir / (clip_id + ".json")
+        if not mp4.exists():
+            raise HTTPException(status_code=404, detail="Clip not found")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(mp4, mp4.name)
+            if jsn.exists():
+                zf.write(jsn, jsn.name)
+        buf.seek(0)
+
+        def _stream():
+            yield buf.read()
+
+        return StreamingResponse(
+            _stream(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename={clip_id}.zip"},
+        )
+
+    @app.post("/api/clips/{clip_id}/annotations")
+    def api_clip_annotations(clip_id: str, body: dict):
+        from datetime import datetime as _datetime
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        jsn = clips_dir / (clip_id + ".json")
+        if not jsn.exists():
+            raise HTTPException(status_code=404, detail="Clip not found")
+        token = body.get("token")
+        if not token:
+            raise HTTPException(status_code=400, detail="token is required")
+        label = body.get("label") or token
+        marks = body.get("marks") or []
+        data = json.loads(jsn.read_text())
+        if "annotations" not in data:
+            data["annotations"] = {}
+        data["annotations"][token] = {
+            "label": label,
+            "saved_at": _datetime.utcnow().isoformat() + "Z",
+            "marks": marks,
+        }
+        jsn.write_text(json.dumps(data, indent=2))
+        return {"ok": True}
+
+    @app.get("/api/clips/{clip_id}/agreement")
+    def api_clip_agreement(clip_id: str):
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        jsn = clips_dir / (clip_id + ".json")
+        if not jsn.exists():
+            raise HTTPException(status_code=404, detail="Clip not found")
+        data = json.loads(jsn.read_text())
+        events = data.get("events") or []
+        annotations = data.get("annotations") or {}
+        reviewer_tokens = list(annotations.keys())
+        fps = data.get("fps") or 30.0
+        result_events = []
+        for ev in events:
+            t = ev.get("frame_idx", 0) / fps if "frame_idx" in ev else ev.get("video_time", 0)
+            rv = {}
+            for token, anno in annotations.items():
+                marks = anno.get("marks") or []
+                rv[token] = any(abs((m.get("video_time") or 0) - t) <= 2.0 for m in marks)
+            result_events.append({"time": t, "reviewers": rv})
+        return {"reviewers": reviewer_tokens, "events": result_events}
 
     # ------------------------------------------------------------------ wizard
 
