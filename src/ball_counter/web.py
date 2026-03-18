@@ -1058,6 +1058,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
   <span class="brand"><a href="/">Ball Counter</a></span>
   <div class="tab" onclick="window.location='/'">Live</div>
   <div class="tab active">Review</div>
+  <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="margin-left:auto;color:#444;font-size:0.78rem;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a>
   <div class="reviewer-bar">
     <span style="color:#666">Reviewer:</span>
     <select id="reviewer-select" onchange="onReviewerChange()">
@@ -1617,7 +1618,7 @@ def create_app(state: AppState) -> FastAPI:
   </style>
 </head>
 <body>
-  <h1>Ball Counter</h1>
+  <h1>Ball Counter <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="font-size:0.6rem;color:#444;font-weight:normal;vertical-align:middle;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a></h1>
   <div id="goals">{stream_cards}</div>
   <div id="log">
     <h2>Recent scores</h2>

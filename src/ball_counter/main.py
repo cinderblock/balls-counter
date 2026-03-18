@@ -208,7 +208,10 @@ def run(args: argparse.Namespace) -> None:
 
 def main():
     args = parse_args()
-    run(args)
+    try:
+        run(args)
+    except KeyboardInterrupt:
+        print("\nShutting down.")
 
 
 if __name__ == "__main__":
