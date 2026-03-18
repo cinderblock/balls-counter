@@ -13,11 +13,12 @@ class CentroidTracker:
     for `max_disappeared` consecutive frames, it is deregistered.
     """
 
-    def __init__(self, max_disappeared: int = 30):
+    def __init__(self, max_disappeared: int = 30, max_distance: float | None = None):
         self.next_id = 0
         self.objects: OrderedDict[int, np.ndarray] = OrderedDict()
         self.disappeared: OrderedDict[int, int] = OrderedDict()
         self.max_disappeared = max_disappeared
+        self.max_distance = max_distance
 
     def register(self, centroid: np.ndarray) -> int:
         object_id = self.next_id
@@ -68,6 +69,9 @@ class CentroidTracker:
 
         for row, col in zip(rows, cols):
             if row in used_rows or col in used_cols:
+                continue
+
+            if self.max_distance is not None and distances[row, col] > self.max_distance:
                 continue
 
             object_id = object_ids[row]

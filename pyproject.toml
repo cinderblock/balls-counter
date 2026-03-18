@@ -8,7 +8,14 @@ dependencies = [
     "numpy>=1.26",
 ]
 
+[project.scripts]
+ball-counter = "ball_counter.main:main"
+
 [project.optional-dependencies]
 dev = [
     "ruff",
+]
+web = [
+    "fastapi>=0.111",
+    "uvicorn>=0.29",
 ]

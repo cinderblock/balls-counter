@@ -1,110 +1,126 @@
-"""Main entry point: multi-stream motion-based ball counter."""
+"""Main entry point: multi-stream motion-based ball counter (headless daemon)."""
 
 import argparse
 import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
-
 from ball_counter.config import load_configs
-from ball_counter.stream import StreamProcessor
+from ball_counter.stream import SourceProcessor
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Count ball scoring events from video streams")
     parser.add_argument("config", help="Path to JSON config file defining streams")
-    parser.add_argument("--no-display", action="store_true",
-                        help="Run headless without visualization windows")
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Enable HTTP API and MJPEG server on this port (e.g. 8080)",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=300,
+        help="Print video-file progress every N processed frames (0 = off)",
+    )
     return parser.parse_args()
 
 
 def run(args: argparse.Namespace) -> None:
-    config_path = Path(args.config)
-    configs = load_configs(config_path)
+    configs = load_configs(Path(args.config))
 
-    # Validate all streams have geometry defined
-    ready_configs = []
+    sources: list[SourceProcessor] = []
     for config in configs:
-        if not config.line and not config.roi_points:
-            print(f"Warning: {config.name} has no line or ROI defined. Skipping.")
-        else:
-            ready_configs.append(config)
-
-    if not ready_configs:
-        print("No streams ready. Define line or roi_points in config.", file=sys.stderr)
-        sys.exit(1)
-
-    # Open all streams
-    processors: list[StreamProcessor] = []
-    for config in ready_configs:
-        proc = StreamProcessor(config)
-        if not proc.open():
-            print(f"Error: cannot open stream {config.name} ({config.source})", file=sys.stderr)
+        ready_goals = [g for g in config.goals if g.line or g.roi_points]
+        skipped = len(config.goals) - len(ready_goals)
+        if skipped:
+            print(f"[{config.source}] WARNING: {skipped} goal(s) have no line or ROI, skipping them")
+        if not ready_goals:
+            print(f"[{config.source}] WARNING: no goals ready, skipping source")
             continue
-        geom = "line" if config.line else "roi"
-        processors.append(proc)
-        print(f"Opened: {config.name} [{config.mode}, {geom}] from {config.source}")
+        config.goals[:] = ready_goals
 
-    if not processors:
-        print("No streams could be opened.", file=sys.stderr)
+        proc = SourceProcessor(config)
+        if not proc.open():
+            print(f"ERROR: cannot open source: {config.source}", file=sys.stderr)
+            continue
+        goal_names = ", ".join(g.name for g in proc.goals)
+        print(f"[{config.source}] connected — goals: {goal_names}")
+        sources.append(proc)
+
+    if not sources:
+        print("ERROR: no sources could be opened", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nRunning {len(processors)} stream(s). Press 'q' to quit.\n")
+    state = None
+    if args.web_port is not None:
+        from ball_counter.web import AppState, start_server_thread
+        state = AppState()
+        for proc in sources:
+            for goal in proc.goals:
+                state.update_count(goal.name, 0)
+        start_server_thread(state, args.web_port)
+        print(f"Web API listening on http://0.0.0.0:{args.web_port}")
+
+    progress_last: dict[str, int] = {}
+    all_live = all(not s.is_video_file for s in sources)
 
     while True:
         frames_read = 0
-        display_tiles: list[np.ndarray] = []
+        file_sources_done = 0
 
-        for proc in processors:
+        for proc in sources:
             if not proc.read_frame():
+                if proc.is_video_file:
+                    file_sources_done += 1
                 continue
             frames_read += 1
 
-            event = proc.process_frame()
-            if event:
-                print(f"[{proc.config.name}] +{event.n_balls} "
-                      f"(peak={event.peak_area}) Total: {proc.count}")
+            ts = proc.timestamp_str
+            results = proc.process_frame()
 
-            if not args.no_display:
-                overlay = proc.draw_overlay()
-                if overlay is not None:
-                    display_tiles.append(overlay)
+            # Progress logging for video files
+            if proc.is_video_file and proc.total_frames > 0 and args.progress_interval > 0:
+                frame_idx = results[0][0].processed_frames if results else 0
+                last = progress_last.get(proc.source, 0)
+                if frame_idx == 1 or frame_idx - last >= args.progress_interval or frame_idx >= proc.total_frames:
+                    pct = frame_idx / proc.total_frames * 100
+                    print(f"[{proc.source}] progress: {frame_idx}/{proc.total_frames} ({pct:.1f}%)")
+                    progress_last[proc.source] = frame_idx
 
-        if frames_read == 0:
+            if state is not None:
+                for name in state.pop_resets():
+                    for goal in proc.goals:
+                        if goal.name == name:
+                            goal.reset_count()
+                            state.update_count(goal.name, 0)
+                            print(f"[{goal.name}] count reset to 0")
+
+            for goal, event in results:
+                if state is not None:
+                    state.update_count(goal.name, goal.count)
+                    jpeg = goal.crop_jpeg()
+                    if jpeg is not None:
+                        state.update_frame(goal.name, jpeg)
+
+                if event:
+                    print(f"[{goal.name}] score at {ts}: +{event.n_balls} (total: {goal.count})")
+                    if state is not None:
+                        state.emit_event(goal.name, event.n_balls, goal.count, ts)
+
+        file_sources = sum(1 for s in sources if s.is_video_file)
+        if frames_read == 0 and (all_live or file_sources_done >= file_sources):
             break
 
-        if not args.no_display and display_tiles:
-            target_h = 480
-            resized = []
-            for tile in display_tiles:
-                scale = target_h / tile.shape[0]
-                resized.append(cv2.resize(tile, None, fx=scale, fy=scale))
-
-            # Arrange in a 2x2 grid
-            while len(resized) < 4:
-                h = resized[0].shape[0]
-                w = resized[0].shape[1]
-                resized.append(np.zeros((h, w, 3), dtype=np.uint8))
-
-            row1 = np.hstack(resized[:2])
-            row2 = np.hstack(resized[2:4])
-            grid = np.vstack([row1, row2])
-
-            cv2.imshow("Ball Counter", grid)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-
-    print("\n--- Final Counts ---")
+    print("\n--- final counts ---")
     total = 0
-    for proc in processors:
-        print(f"  {proc.config.name} [{proc.config.mode}]: {proc.count}")
-        total += proc.count
+    for proc in sources:
+        for goal in proc.goals:
+            print(f"  {goal.name}: {goal.count}")
+            total += goal.count
         proc.release()
-    print(f"  Combined total: {total}")
-
-    cv2.destroyAllWindows()
+    print(f"  combined: {total}")
 
 
 def main():

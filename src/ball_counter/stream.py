@@ -1,48 +1,55 @@
-"""Single stream processor: motion-based counting for one camera."""
+"""Video source and goal processors for motion-based ball counting."""
 
 import os
+import time
+from datetime import datetime, timedelta
 
 import cv2
 import numpy as np
 
-from ball_counter.config import StreamConfig
+from ball_counter.config import GoalConfig, SourceConfig
 from ball_counter.counter import MotionCounter, MotionEvent
 
 
-class StreamProcessor:
-    """Processes a single video stream using motion-based counting."""
+class GoalProcessor:
+    """Counts balls for one goal zone on a shared video frame."""
 
-    def __init__(self, config: StreamConfig):
+    def __init__(self, config: GoalConfig):
         self.config = config
-        self.cap: cv2.VideoCapture | None = None
-        self.frame: np.ndarray | None = None
         self.counter: MotionCounter | None = None
         self.last_event: MotionEvent | None = None
         self.score_flash = 0
+        self._crop_bounds: tuple[int, int, int, int] | None = None
+        self._last_frame: np.ndarray | None = None
 
-    def open(self) -> bool:
-        source = self.config.source
-        # Use TCP for RTSP streams
-        if source.startswith("rtsp://"):
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-            self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
-        else:
-            self.cap = cv2.VideoCapture(source)
+    @property
+    def name(self) -> str:
+        return self.config.name
 
-        if not self.cap.isOpened():
-            return False
+    @property
+    def count(self) -> int:
+        return self.counter.count if self.counter else 0
 
-        # Read first frame to get dimensions and initialize counter
-        ret, self.frame = self.cap.read()
-        if not ret:
-            return False
+    @property
+    def processed_frames(self) -> int:
+        return self.counter.frame_idx if self.counter else 0
 
-        h, w = self.frame.shape[:2]
-        line = tuple(self.config.line) if self.config.line else None
-        roi = self.config.roi_points if self.config.roi_points else None
+    def init(self, frame: np.ndarray) -> None:
+        """Initialize the MotionCounter from the first frame."""
+        h, w = frame.shape[:2]
+        self._crop_bounds = self._compute_crop(h, w)
+        x1, y1, x2, y2 = self._crop_bounds
 
+        # Offset geometry into crop-local coordinates
+        def offset(pts: list[list[int]]) -> list[list[int]]:
+            return [[p[0] - x1, p[1] - y1] for p in pts]
+
+        line = tuple(offset(self.config.line)) if self.config.line else None
+        roi = offset(self.config.roi_points) if self.config.roi_points else None
+
+        crop_h, crop_w = y2 - y1, x2 - x1
         self.counter = MotionCounter(
-            frame_shape=(h, w),
+            frame_shape=(crop_h, crop_w),
             line=line,
             roi=roi,
             ball_area=self.config.ball_area,
@@ -53,60 +60,33 @@ class StreamProcessor:
             hsv_low=self.config.hsv_low,
             hsv_high=self.config.hsv_high,
         )
+        self.counter.process_frame(frame[y1:y2, x1:x2])
 
-        # Process the first frame we already read
-        self.counter.process_frame(self.frame)
-        return True
+    def reset_count(self) -> None:
+        if self.counter is not None:
+            self.counter.count = 0
 
-    def read_frame(self) -> bool:
-        if self.cap is None:
-            return False
-        ret, self.frame = self.cap.read()
-        return ret
-
-    def process_frame(self) -> MotionEvent | None:
-        """Run motion counting on the current frame.
-
-        Returns a MotionEvent if scoring happened this frame.
-        """
-        if self.frame is None or self.counter is None:
+    def process(self, frame: np.ndarray) -> MotionEvent | None:
+        """Run motion counting on the crop region of the given frame."""
+        if self.counter is None:
             return None
-
-        event = self.counter.process_frame(self.frame)
-
+        self._last_frame = frame
+        x1, y1, x2, y2 = self._crop_bounds
+        event = self.counter.process_frame(frame[y1:y2, x1:x2])
         if event is not None:
             self.last_event = event
             self.score_flash = 20
-
         return event
 
-    @property
-    def count(self) -> int:
-        return self.counter.count if self.counter else 0
-
-    def draw_overlay(self) -> np.ndarray | None:
-        """Draw detection overlay on the current frame and return it."""
-        if self.frame is None or self.counter is None:
+    def crop_jpeg(self, quality: int = 75) -> bytes | None:
+        """Return the goal window crop with overlay as JPEG bytes."""
+        if self._last_frame is None or self.counter is None:
             return None
 
-        display = self.frame.copy()
+        x1, y1, x2, y2 = self._crop_bounds
+        display = self._last_frame[y1:y2, x1:x2].copy()
+        self.counter.draw(display, color=self.config.draw_color)
 
-        # Draw the detection zone
-        self.counter.draw(display)
-
-        # Header bar
-        cv2.rectangle(display, (0, 0), (display.shape[1], 50), (0, 0, 0), -1)
-        label = f"{self.config.name} [{self.config.mode}] Count: {self.count}"
-        cv2.putText(display, label, (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-        signal_text = f"Signal: {self.counter.signal:5d}px"
-        if self.counter.rising:
-            signal_text += " RISING"
-        cv2.putText(display, signal_text, (10, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 200), 1)
-
-        # Flash on score
         if self.score_flash > 0:
             alpha = self.score_flash / 20
             overlay = display.copy()
@@ -119,7 +99,119 @@ class StreamProcessor:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             self.score_flash -= 1
 
-        return display
+        ok, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return bytes(buf) if ok else None
+
+    def _compute_crop(self, h: int, w: int, padding: int = 150) -> tuple[int, int, int, int]:
+        points: list[tuple[int, int]] = []
+        if self.config.line:
+            points = list(self.config.line)
+        elif self.config.roi_points:
+            points = list(self.config.roi_points)
+        if not points:
+            return (0, 0, w, h)
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        return (
+            max(0, min(xs) - padding),
+            max(0, min(ys) - padding),
+            min(w, max(xs) + padding),
+            min(h, max(ys) + padding),
+        )
+
+
+class SourceProcessor:
+    """Opens one video source and runs all its goal processors on each frame."""
+
+    def __init__(self, config: SourceConfig):
+        self.config = config
+        self.goals: list[GoalProcessor] = [GoalProcessor(g) for g in config.goals]
+        self.cap: cv2.VideoCapture | None = None
+        self._frame: np.ndarray | None = None
+        self._total_frames = 0
+        self._is_video_file = False
+
+    @property
+    def source(self) -> str:
+        return self.config.source
+
+    @property
+    def is_video_file(self) -> bool:
+        return self._is_video_file
+
+    @property
+    def total_frames(self) -> int:
+        return self._total_frames
+
+    @property
+    def timestamp_str(self) -> str:
+        if self._is_video_file and self.cap is not None:
+            ms = self.cap.get(cv2.CAP_PROP_POS_MSEC)
+            td = timedelta(milliseconds=ms)
+            total_s = int(td.total_seconds())
+            h, rem = divmod(total_s, 3600)
+            m, s = divmod(rem, 60)
+            return f"{h}:{m:02d}:{s:02d}.{int(td.microseconds / 1000):03d}"
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+    def open(self) -> bool:
+        source = self.config.source
+        if source.startswith("rtsp://"):
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+            self._is_video_file = False
+        else:
+            self.cap = cv2.VideoCapture(source)
+            self._is_video_file = True
+
+        if not self.cap.isOpened():
+            return False
+
+        self._total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        ret, self._frame = self.cap.read()
+        if not ret:
+            return False
+
+        for goal in self.goals:
+            goal.init(self._frame)
+        return True
+
+    def _reopen(self) -> bool:
+        source = self.config.source
+        if self.cap is not None:
+            self.cap.release()
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        return self.cap.isOpened()
+
+    def read_frame(self) -> bool:
+        if self.cap is None:
+            return False
+        ret, frame = self.cap.read()
+        if ret:
+            self._frame = frame
+            return True
+        if self._is_video_file:
+            return False
+        print(f"[{self.source}] stream dropped, reconnecting...")
+        for attempt in range(1, 6):
+            time.sleep(2 * attempt)
+            if self._reopen():
+                ret, frame = self.cap.read()
+                if ret:
+                    self._frame = frame
+                    print(f"[{self.source}] reconnected")
+                    return True
+            print(f"[{self.source}] reconnect attempt {attempt} failed")
+        print(f"[{self.source}] giving up after 5 attempts")
+        return False
+
+    def process_frame(self) -> list[tuple[GoalProcessor, MotionEvent | None]]:
+        """Process the current frame through all goal counters."""
+        if self._frame is None:
+            return []
+        return [(goal, goal.process(self._frame)) for goal in self.goals]
 
     def release(self) -> None:
         if self.cap is not None:

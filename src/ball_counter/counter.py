@@ -140,18 +140,19 @@ class MotionCounter:
         """Current signal value (moving yellow pixels in zone)."""
         return self.prev_area
 
-    def draw(self, frame: np.ndarray, alpha: float = 0.2) -> None:
+    def draw(self, frame: np.ndarray, alpha: float = 0.2,
+             color: tuple[int, int, int] = (0, 0, 255)) -> None:
         """Draw the detection zone on a frame."""
+        dim = tuple(max(0, c - 75) for c in color)  # darker fill
         overlay = frame.copy()
         if self.mode == "line":
             p1, p2 = self.line
-            cv2.line(frame, tuple(p1), tuple(p2), (0, 0, 255), 2)
-            cv2.fillPoly(overlay, [self.draw_pts], (0, 0, 180))
+            cv2.line(frame, tuple(p1), tuple(p2), color, 2)
+            cv2.fillPoly(overlay, [self.draw_pts], dim)
         else:
-            cv2.polylines(frame, [self.roi_pts], True, (0, 0, 255), 2)
-            # Tint the ring
+            cv2.polylines(frame, [self.roi_pts], True, color, 2)
             ring_colored = np.zeros_like(frame)
-            ring_colored[self.mask > 0] = (0, 0, 180)
+            ring_colored[self.mask > 0] = dim
             overlay = cv2.add(overlay, ring_colored)
         cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0, frame)
 
