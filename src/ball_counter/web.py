@@ -233,14 +233,36 @@ def create_app(state: AppState) -> FastAPI:
     return app
 
 
-def start_server(state: AppState, port: int) -> None:
+def start_server(
+    state: AppState,
+    port: int,
+    host: str = "0.0.0.0",
+    trusted_proxies: list[str] | None = None,
+) -> None:
     """Start the uvicorn server in the current thread (blocks until done)."""
     app = create_app(state)
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    forwarded_allow_ips = ",".join(trusted_proxies) if trusted_proxies else None
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        proxy_headers=trusted_proxies is not None,
+        forwarded_allow_ips=forwarded_allow_ips,
+    )
 
 
-def start_server_thread(state: AppState, port: int) -> threading.Thread:
+def start_server_thread(
+    state: AppState,
+    port: int,
+    host: str = "0.0.0.0",
+    trusted_proxies: list[str] | None = None,
+) -> threading.Thread:
     """Launch the web server in a background daemon thread."""
-    t = threading.Thread(target=start_server, args=(state, port), daemon=True)
+    t = threading.Thread(
+        target=start_server,
+        args=(state, port, host, trusted_proxies),
+        daemon=True,
+    )
     t.start()
     return t

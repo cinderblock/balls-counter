@@ -19,6 +19,18 @@ def parse_args() -> argparse.Namespace:
         help="Enable HTTP API and MJPEG server on this port (e.g. 8080)",
     )
     parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        metavar="HOST",
+        help="Interface to bind the web server to (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--trusted-proxies",
+        default=None,
+        metavar="IPS",
+        help="Comma-separated IPs (or '*') to trust for X-Forwarded-* headers (e.g. for Caddy)",
+    )
+    parser.add_argument(
         "--progress-interval",
         type=int,
         default=300,
@@ -60,8 +72,9 @@ def run(args: argparse.Namespace) -> None:
         for proc in sources:
             for goal in proc.goals:
                 state.update_count(goal.name, 0)
-        start_server_thread(state, args.web_port)
-        print(f"Web API listening on http://0.0.0.0:{args.web_port}")
+        trusted = [p.strip() for p in args.trusted_proxies.split(",")] if args.trusted_proxies else None
+        start_server_thread(state, port=args.web_port, host=args.host, trusted_proxies=trusted)
+        print(f"Web API listening on http://{args.host}:{args.web_port}")
 
     progress_last: dict[str, int] = {}
     all_live = all(not s.is_video_file for s in sources)
