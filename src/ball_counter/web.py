@@ -961,7 +961,7 @@ def create_app(state: AppState) -> FastAPI:
               <div class="count" id="count-{name}">0</div>
               <div class="btn-row">
                 <button class="clear-btn" onclick="resetGoal('{name}')">Clear</button>
-                <button class="clip-btn" id="clip-{name}" onclick="saveClip('{name}')">Save clip</button>
+                <button class="clip-btn" id="clip-{name}" onclick="saveClip('{name}')">Save last 60s</button>
                 <button class="capture-btn" id="cap-{name}" onclick="captureScore('{name}')">Capture score</button>
               </div>
               <img src="/api/stream/{name}.mjpeg" onerror="this.style.opacity='0.3'" />
@@ -1038,12 +1038,12 @@ def create_app(state: AppState) -> FastAPI:
       fetch('/api/clip/save', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{goal: name}})}})
         .then(r => r.json())
         .then(d => {{
-          btn.textContent = d.ok ? `Saved (${{d.n_frames}}f)` : 'Error';
-          setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Save clip'; }}, 3000);
+          btn.textContent = d.ok ? `Saved ${{d.seconds}}s` : 'Error';
+          setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Save last 60s'; }}, 3000);
         }})
         .catch(() => {{
           btn.textContent = 'Error';
-          setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Save clip'; }}, 3000);
+          setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Save last 60s'; }}, 3000);
         }});
     }}
 
@@ -1101,7 +1101,8 @@ def create_app(state: AppState) -> FastAPI:
         clips_dir = state.get_clips_dir() or _Path("clips")
         from ball_counter.clips import save_clip
         mp4, jsn = save_clip(frames, goal, clips_dir)
-        return {"ok": True, "mp4": str(mp4), "json": str(jsn), "n_frames": len(frames)}
+        seconds = round(len(frames) / 30.0)
+        return {"ok": True, "mp4": str(mp4), "json": str(jsn), "seconds": seconds}
 
     @app.post("/api/capture")
     def capture(body: dict):
