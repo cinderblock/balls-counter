@@ -177,6 +177,7 @@ def run(args: argparse.Namespace) -> None:
                             goal.reset_count()
                             goal.buffer.clear()
                             state.update_count(goal.name, 0)
+                            state.emit_reset(goal.name)
                             print(f"[{goal.name}] count reset to 0")
 
             for goal, event in results:

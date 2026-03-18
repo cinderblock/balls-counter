@@ -82,7 +82,16 @@ class AppState:
             self._frames[name] = jpeg
 
     def emit_event(self, name: str, n_balls: int, total: int, timestamp: str) -> None:
-        event = {"stream": name, "n_balls": n_balls, "total": total, "time": timestamp}
+        event = {"type": "score", "stream": name, "n_balls": n_balls, "total": total, "time": timestamp}
+        with self._lock:
+            for q in self._event_queues:
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    pass
+
+    def emit_reset(self, name: str) -> None:
+        event = {"type": "reset", "stream": name, "total": 0}
         with self._lock:
             for q in self._event_queues:
                 try:
@@ -1048,10 +1057,7 @@ def create_app(state: AppState) -> FastAPI:
     }}
 
     function resetGoal(name) {{
-      fetch('/api/reset/' + name, {{method: 'POST'}}).then(() => {{
-        const el = document.getElementById('count-' + name);
-        if (el) el.textContent = '0';
-      }});
+      fetch('/api/reset/' + name, {{method: 'POST'}});
     }}
 
     // Listen for score events
@@ -1063,11 +1069,12 @@ def create_app(state: AppState) -> FastAPI:
       counts[ev.stream] = ev.total;
       const el = document.getElementById('count-' + ev.stream);
       if (el) el.textContent = ev.total;
-
-      const li = document.createElement('li');
-      li.innerHTML = `<span class="flash">+${{ev.n_balls}}</span> ${{ev.stream}} &mdash; total ${{ev.total}} &nbsp;<small style="color:#555">${{ev.time}}</small>`;
-      evtList.prepend(li);
-      if (evtList.children.length > 50) evtList.lastChild.remove();
+      if (ev.type === 'score') {{
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="flash">+${{ev.n_balls}}</span> ${{ev.stream}} &mdash; total ${{ev.total}} &nbsp;<small style="color:#555">${{ev.time}}</small>`;
+        evtList.prepend(li);
+        if (evtList.children.length > 50) evtList.lastChild.remove();
+      }}
     }};
   </script>
 </body>
