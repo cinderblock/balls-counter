@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 
 # Media files (videos, images) — too large for git
