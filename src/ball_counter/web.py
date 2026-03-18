@@ -59,6 +59,8 @@ class AppState:
         self._pending_resets: set[str] = set()
         self._buffers: dict = {}   # goal_name -> RollingBuffer
         self._clips_dir: "Path | None" = None
+        # Live capture sessions: goal_name -> session dict
+        self._capture_sessions: dict = {}
 
     def request_reset(self, name: str) -> None:
         with self._lock:
@@ -115,6 +117,82 @@ class AppState:
     def get_clips_dir(self):
         with self._lock:
             return self._clips_dir
+
+    def press_capture(self, goal_name: str, fps_hint: float = 30.0) -> str:
+        """Record a capture button press. Returns 'new', 'grouped', or 'error'."""
+        import time as _time
+        with self._lock:
+            buf = self._buffers.get(goal_name)
+            if buf is None:
+                return "error"
+            latest = buf.latest()
+            if latest is None:
+                return "error"
+            press_frame = latest.frame_idx
+            press_ts = latest.timestamp
+            session = self._capture_sessions.get(goal_name)
+            now = _time.monotonic()
+            if session is not None and now - session["last_press_time"] < 5.0:
+                session["press_frame_idxs"].append(press_frame)
+                session["press_timestamps"].append(press_ts)
+                session["last_press_time"] = now
+                session["timer"].cancel()
+                t = threading.Timer(4.0, self._flush_capture, args=(goal_name, fps_hint))
+                t.daemon = True
+                t.start()
+                session["timer"] = t
+                return "grouped"
+            else:
+                if session is not None:
+                    session["timer"].cancel()
+                t = threading.Timer(4.0, self._flush_capture, args=(goal_name, fps_hint))
+                t.daemon = True
+                t.start()
+                self._capture_sessions[goal_name] = {
+                    "press_frame_idxs": [press_frame],
+                    "press_timestamps": [press_ts],
+                    "first_press_time": now,
+                    "last_press_time": now,
+                    "timer": t,
+                }
+                return "new"
+
+    def _flush_capture(self, goal_name: str, fps: float) -> None:
+        """Called 4 s after last press; slices buffer and saves clip."""
+        import json as _json
+        from pathlib import Path as _Path
+        with self._lock:
+            session = self._capture_sessions.pop(goal_name, None)
+            buf = self._buffers.get(goal_name)
+            clips_dir = self._clips_dir
+        if session is None or buf is None:
+            return
+        frames_per_sec = fps
+        first_idx = min(session["press_frame_idxs"])
+        last_idx = max(session["press_frame_idxs"])
+        start_idx = max(0, first_idx - int(frames_per_sec * 1))
+        end_idx = last_idx + int(frames_per_sec * 4)
+        clip_frames = buf.slice_by_index(start_idx, end_idx)
+        if not clip_frames:
+            print(f"[{goal_name}] capture: no frames in window, skipping")
+            return
+        if clips_dir is None:
+            clips_dir = _Path("clips")
+        from ball_counter.clips import save_clip
+        try:
+            mp4, jsn = save_clip(clip_frames, goal_name, clips_dir, fps=fps)
+            with open(jsn) as f:
+                data = _json.load(f)
+            data["captures"] = [
+                {"frame_idx": fi, "timestamp": ts}
+                for fi, ts in zip(session["press_frame_idxs"], session["press_timestamps"])
+            ]
+            with open(jsn, "w") as f:
+                _json.dump(data, f, indent=2)
+            print(f"[{goal_name}] capture saved: {mp4.name} ({len(clip_frames)} frames, "
+                  f"{len(session['press_frame_idxs'])} press(es))")
+        except Exception as e:
+            print(f"[{goal_name}] capture save failed: {e}")
 
     def _subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=100)
@@ -884,6 +962,7 @@ def create_app(state: AppState) -> FastAPI:
               <div class="btn-row">
                 <button class="clear-btn" onclick="resetGoal('{name}')">Clear</button>
                 <button class="clip-btn" id="clip-{name}" onclick="saveClip('{name}')">Save clip</button>
+                <button class="capture-btn" id="cap-{name}" onclick="captureScore('{name}')">Capture score</button>
               </div>
               <img src="/api/stream/{name}.mjpeg" onerror="this.style.opacity='0.3'" />
             </div>"""
@@ -913,6 +992,9 @@ def create_app(state: AppState) -> FastAPI:
     .clear-btn:hover {{ background: #500; color: #fff; border-color: #a00; }}
     .clip-btn:hover {{ background: #135; color: #9cf; border-color: #47a; }}
     .clip-btn:disabled {{ opacity: 0.5; cursor: default; }}
+    .capture-btn {{ background: #1a3a1a; color: #8f8; border-color: #383; }}
+    .capture-btn:hover {{ background: #2a5a2a; color: #afa; border-color: #5a5; }}
+    .capture-btn.flash {{ background: #4a8a2a; color: #fff; border-color: #8f8; }}
   </style>
 </head>
 <body>
@@ -936,6 +1018,18 @@ def create_app(state: AppState) -> FastAPI:
         if (el) el.textContent = count;
       }}
     }});
+
+    function captureScore(name) {{
+      const btn = document.getElementById('cap-' + name);
+      fetch('/api/capture', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{goal: name}})}})
+        .then(r => r.json())
+        .then(d => {{
+          btn.textContent = d.grouped ? '+ grouped' : '✓ captured';
+          btn.classList.add('flash');
+          setTimeout(() => {{ btn.textContent = 'Capture score'; btn.classList.remove('flash'); }}, 1500);
+        }})
+        .catch(() => {{ btn.textContent = 'Error'; setTimeout(() => btn.textContent = 'Capture score', 2000); }});
+    }}
 
     function saveClip(name) {{
       const btn = document.getElementById('clip-' + name);
@@ -1008,6 +1102,17 @@ def create_app(state: AppState) -> FastAPI:
         from ball_counter.clips import save_clip
         mp4, jsn = save_clip(frames, goal, clips_dir)
         return {"ok": True, "mp4": str(mp4), "json": str(jsn), "n_frames": len(frames)}
+
+    @app.post("/api/capture")
+    def capture(body: dict):
+        from fastapi import HTTPException
+        goal = body.get("goal")
+        if not goal:
+            raise HTTPException(status_code=400, detail="Missing 'goal' field")
+        result = state.press_capture(goal)
+        if result == "error":
+            raise HTTPException(status_code=404, detail=f"Goal '{goal}' not found or buffer empty")
+        return {"ok": True, "grouped": result == "grouped"}
 
     @app.get("/api/events")
     async def events():
