@@ -57,6 +57,8 @@ class AppState:
         self._frames: dict[str, bytes] = {}  # latest JPEG per stream
         self._event_queues: list[queue.Queue] = []
         self._pending_resets: set[str] = set()
+        self._buffers: dict = {}   # goal_name -> RollingBuffer
+        self._clips_dir: "Path | None" = None
 
     def request_reset(self, name: str) -> None:
         with self._lock:
@@ -97,6 +99,22 @@ class AppState:
     def get_stream_names(self) -> list[str]:
         with self._lock:
             return list(self._counts.keys())
+
+    def register_buffer(self, name: str, buf) -> None:
+        with self._lock:
+            self._buffers[name] = buf
+
+    def set_clips_dir(self, path) -> None:
+        with self._lock:
+            self._clips_dir = path
+
+    def get_buffer(self, name: str):
+        with self._lock:
+            return self._buffers.get(name)
+
+    def get_clips_dir(self):
+        with self._lock:
+            return self._clips_dir
 
     def _subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=100)
@@ -863,7 +881,10 @@ def create_app(state: AppState) -> FastAPI:
             <div class="card">
               <div class="goal-label" style="color:{color}">{name}</div>
               <div class="count" id="count-{name}">0</div>
-              <button class="clear-btn" onclick="resetGoal('{name}')">Clear</button>
+              <div class="btn-row">
+                <button class="clear-btn" onclick="resetGoal('{name}')">Clear</button>
+                <button class="clip-btn" id="clip-{name}" onclick="saveClip('{name}')">Save clip</button>
+              </div>
               <img src="/api/stream/{name}.mjpeg" onerror="this.style.opacity='0.3'" />
             </div>"""
 
@@ -887,8 +908,11 @@ def create_app(state: AppState) -> FastAPI:
     #events li {{ padding: 0.3rem 0.5rem; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; color: #ccc; }}
     #events li span.flash {{ color: #0f0; font-weight: bold; }}
     #status {{ text-align: center; font-size: 0.75rem; color: #444; margin-top: 1rem; }}
-    .clear-btn {{ margin-bottom: 0.6rem; padding: 0.3rem 1rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }}
+    .btn-row {{ display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 0.6rem; flex-wrap: wrap; }}
+    .clear-btn, .clip-btn {{ padding: 0.3rem 1rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }}
     .clear-btn:hover {{ background: #500; color: #fff; border-color: #a00; }}
+    .clip-btn:hover {{ background: #135; color: #9cf; border-color: #47a; }}
+    .clip-btn:disabled {{ opacity: 0.5; cursor: default; }}
   </style>
 </head>
 <body>
@@ -912,6 +936,22 @@ def create_app(state: AppState) -> FastAPI:
         if (el) el.textContent = count;
       }}
     }});
+
+    function saveClip(name) {{
+      const btn = document.getElementById('clip-' + name);
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      fetch('/api/clip/save', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{goal: name}})}})
+        .then(r => r.json())
+        .then(d => {{
+          btn.textContent = d.ok ? `Saved (${d.n_frames}f)` : 'Error';
+          setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Save clip'; }}, 3000);
+        }})
+        .catch(() => {{
+          btn.textContent = 'Error';
+          setTimeout(() => {{ btn.disabled = false; btn.textContent = 'Save clip'; }}, 3000);
+        }});
+    }}
 
     function resetGoal(name) {{
       fetch('/api/reset/' + name, {{method: 'POST'}}).then(() => {{
@@ -950,6 +990,24 @@ def create_app(state: AppState) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Stream '{name}' not found")
         state.request_reset(name)
         return {"ok": True}
+
+    @app.post("/api/clip/save")
+    def clip_save(req: dict):
+        from pathlib import Path as _Path
+        from fastapi import HTTPException
+        goal = req.get("goal")
+        if not goal:
+            raise HTTPException(status_code=400, detail="Missing 'goal' field")
+        buf = state.get_buffer(goal)
+        if buf is None:
+            raise HTTPException(status_code=404, detail=f"Goal '{goal}' not found")
+        frames = buf.snapshot()
+        if not frames:
+            raise HTTPException(status_code=400, detail="Buffer is empty — no frames captured yet")
+        clips_dir = state.get_clips_dir() or _Path("clips")
+        from ball_counter.clips import save_clip
+        mp4, jsn = save_clip(frames, goal, clips_dir)
+        return {"ok": True, "mp4": str(mp4), "json": str(jsn), "n_frames": len(frames)}
 
     @app.get("/api/events")
     async def events():

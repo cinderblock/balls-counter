@@ -138,9 +138,11 @@ def run(args: argparse.Namespace) -> None:
         print(f"Web API listening on {_web_url(args.host, web_port, web_socket)}")
 
     if state is not None:
+        state.set_clips_dir(config_path.parent / "clips")
         for proc in sources:
             for goal in proc.goals:
                 state.update_count(goal.name, 0)
+                state.register_buffer(goal.name, goal.buffer)
 
     progress_last: dict[str, int] = {}
     all_live = all(not s.is_video_file for s in sources)
