@@ -48,6 +48,10 @@ class RollingBuffer:
         with self._lock:
             return self._buf[-1] if self._buf else None
 
+    def clear(self) -> None:
+        with self._lock:
+            self._buf.clear()
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._buf)

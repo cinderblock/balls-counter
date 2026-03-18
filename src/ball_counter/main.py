@@ -175,6 +175,7 @@ def run(args: argparse.Namespace) -> None:
                     for goal in proc.goals:
                         if goal.name == name:
                             goal.reset_count()
+                            goal.buffer.clear()
                             state.update_count(goal.name, 0)
                             print(f"[{goal.name}] count reset to 0")
 
