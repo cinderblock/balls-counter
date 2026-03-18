@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import cv2
 import numpy as np
 
+from ball_counter.buffer import BufferFrame, RollingBuffer
 from ball_counter.config import GoalConfig, SourceConfig
 from ball_counter.counter import MotionCounter, MotionEvent
 
@@ -21,6 +22,7 @@ class GoalProcessor:
         self.score_flash = 0
         self._crop_bounds: tuple[int, int, int, int] | None = None
         self._last_frame: np.ndarray | None = None
+        self.buffer = RollingBuffer()
 
     @property
     def name(self) -> str:
@@ -72,7 +74,7 @@ class GoalProcessor:
         if self.counter is not None:
             self.counter.count = 0
 
-    def process(self, frame: np.ndarray) -> MotionEvent | None:
+    def process(self, frame: np.ndarray, timestamp: str = "") -> MotionEvent | None:
         """Run motion counting on the crop region of the given frame."""
         if self.counter is None:
             return None
@@ -86,6 +88,20 @@ class GoalProcessor:
         if event is not None:
             self.last_event = event
             self.score_flash = 20
+
+        # Feed rolling buffer with the raw (no overlay) full-resolution crop
+        raw = frame[y1:y2, x1:x2]
+        ok, buf = cv2.imencode(".jpg", raw, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        if ok:
+            self.buffer.append(BufferFrame(
+                timestamp=timestamp,
+                jpeg=bytes(buf),
+                frame_idx=self.counter.frame_idx,
+                signal=self.counter.signal,
+                rising=self.counter.rising,
+                event=event,
+            ))
+
         return event
 
     def crop_jpeg(self, quality: int = 75) -> bytes | None:
@@ -224,7 +240,8 @@ class SourceProcessor:
         """Process the current frame through all goal counters."""
         if self._frame is None:
             return []
-        return [(goal, goal.process(self._frame)) for goal in self.goals]
+        ts = self.timestamp_str
+        return [(goal, goal.process(self._frame, ts)) for goal in self.goals]
 
     def release(self) -> None:
         if self.cap is not None:
