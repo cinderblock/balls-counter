@@ -39,17 +39,20 @@ class GoalProcessor:
         h, w = frame.shape[:2]
         self._crop_bounds = self._compute_crop(h, w)
         x1, y1, x2, y2 = self._crop_bounds
+        ds = self.config.downsample
 
-        # Offset geometry into crop-local coordinates
-        def offset(pts: list[list[int]]) -> list[list[int]]:
-            return [[p[0] - x1, p[1] - y1] for p in pts]
+        # Offset geometry into crop-local coordinates, then apply downsample
+        def offset_scale(pts: list[list[int]]) -> list[list[int]]:
+            return [[int((p[0] - x1) * ds), int((p[1] - y1) * ds)] for p in pts]
 
-        line = tuple(offset(self.config.line)) if self.config.line else None
-        roi = offset(self.config.roi_points) if self.config.roi_points else None
+        line = tuple(offset_scale(self.config.line)) if self.config.line else None
+        roi = offset_scale(self.config.roi_points) if self.config.roi_points else None
 
         crop_h, crop_w = y2 - y1, x2 - x1
+        scaled_h = int(crop_h * ds)
+        scaled_w = int(crop_w * ds)
         self.counter = MotionCounter(
-            frame_shape=(crop_h, crop_w),
+            frame_shape=(scaled_h, scaled_w),
             line=line,
             roi=roi,
             ball_area=self.config.ball_area,
@@ -60,7 +63,10 @@ class GoalProcessor:
             hsv_low=self.config.hsv_low,
             hsv_high=self.config.hsv_high,
         )
-        self.counter.process_frame(frame[y1:y2, x1:x2])
+        crop = frame[y1:y2, x1:x2]
+        if ds != 1.0:
+            crop = cv2.resize(crop, (scaled_w, scaled_h))
+        self.counter.process_frame(crop)
 
     def reset_count(self) -> None:
         if self.counter is not None:
@@ -72,7 +78,11 @@ class GoalProcessor:
             return None
         self._last_frame = frame
         x1, y1, x2, y2 = self._crop_bounds
-        event = self.counter.process_frame(frame[y1:y2, x1:x2])
+        crop = frame[y1:y2, x1:x2]
+        ds = self.config.downsample
+        if ds != 1.0:
+            crop = cv2.resize(crop, (int((x2 - x1) * ds), int((y2 - y1) * ds)))
+        event = self.counter.process_frame(crop)
         if event is not None:
             self.last_event = event
             self.score_flash = 20
@@ -103,6 +113,9 @@ class GoalProcessor:
         return bytes(buf) if ok else None
 
     def _compute_crop(self, h: int, w: int, padding: int = 150) -> tuple[int, int, int, int]:
+        if self.config.crop_override is not None:
+            x1, y1, x2, y2 = self.config.crop_override
+            return (max(0, x1), max(0, y1), min(w, x2), min(h, y2))
         points: list[tuple[int, int]] = []
         if self.config.line:
             points = list(self.config.line)

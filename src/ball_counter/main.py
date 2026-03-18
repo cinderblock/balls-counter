@@ -2,10 +2,13 @@
 
 import argparse
 import sys
+import threading
 from pathlib import Path
 
 from ball_counter.config import load_configs
 from ball_counter.stream import SourceProcessor
+
+_DEFAULT_WIZARD_PORT = 8080
 
 
 def parse_args() -> argparse.Namespace:
@@ -13,10 +16,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("config", help="Path to JSON config file defining streams")
     parser.add_argument(
         "--web-port",
-        type=int,
         default=None,
-        metavar="PORT",
-        help="Enable HTTP API and MJPEG server on this port (e.g. 8080)",
+        metavar="PORT_OR_SOCKET",
+        help="Enable HTTP API server on a TCP port (e.g. 8080) or Unix socket path (e.g. /run/ball-counter.sock)",
     )
     parser.add_argument(
         "--host",
@@ -36,12 +38,30 @@ def parse_args() -> argparse.Namespace:
         default=300,
         help="Print video-file progress every N processed frames (0 = off)",
     )
+    parser.add_argument(
+        "--wizard",
+        action="store_true",
+        help="Launch setup wizard even if config already exists",
+    )
     return parser.parse_args()
 
 
-def run(args: argparse.Namespace) -> None:
-    configs = load_configs(Path(args.config))
+def _parse_web_binding(value: str) -> tuple[int | None, str | None]:
+    """Return (port, None) for a TCP port or (None, socket_path) for a socket path."""
+    try:
+        return int(value), None
+    except ValueError:
+        return None, value
 
+
+def _web_url(host: str, port: int | None, socket: str | None) -> str:
+    if socket:
+        return f"unix:{socket}"
+    return f"http://{host}:{port}"
+
+
+def _start_sources(config_path: Path) -> list[SourceProcessor]:
+    configs = load_configs(config_path)
     sources: list[SourceProcessor] = []
     for config in configs:
         ready_goals = [g for g in config.goals if g.line or g.roi_points]
@@ -52,7 +72,6 @@ def run(args: argparse.Namespace) -> None:
             print(f"[{config.source}] WARNING: no goals ready, skipping source")
             continue
         config.goals[:] = ready_goals
-
         proc = SourceProcessor(config)
         if not proc.open():
             print(f"ERROR: cannot open source: {config.source}", file=sys.stderr)
@@ -60,21 +79,68 @@ def run(args: argparse.Namespace) -> None:
         goal_names = ", ".join(g.name for g in proc.goals)
         print(f"[{config.source}] connected — goals: {goal_names}")
         sources.append(proc)
+    return sources
+
+
+def run(args: argparse.Namespace) -> None:
+    config_path = Path(args.config)
+    config_missing = not config_path.exists()
+    wizard_mode = config_missing or args.wizard
+
+    # Parse web binding; when config is missing the wizard always needs a port
+    if args.web_port:
+        web_port, web_socket = _parse_web_binding(args.web_port)
+    elif config_missing:
+        web_port, web_socket = _DEFAULT_WIZARD_PORT, None
+    else:
+        web_port, web_socket = None, None
+
+    trusted = [p.strip() for p in args.trusted_proxies.split(",")] if args.trusted_proxies else None
+
+    web_state = None
+    wizard_done: threading.Event | None = None
+
+    if wizard_mode:
+        from ball_counter import web as _web
+        from ball_counter.web import AppState, start_server_thread
+        existing = None
+        if not config_missing:
+            existing = load_configs(config_path)
+        wizard_done = threading.Event()
+        _web.set_wizard_state(str(config_path), existing, wizard_done)
+        web_state = AppState()
+        start_server_thread(web_state, port=web_port, host=args.host,
+                            socket_path=web_socket, trusted_proxies=trusted)
+        url = _web_url(args.host, web_port, web_socket)
+        if config_missing:
+            print(f"Config not found. Open {url}/wizard to set up.")
+            wizard_done.wait()  # block until wizard saves the config
+            print("Wizard saved config — starting processors...")
+        else:
+            print(f"Wizard active. Open {url}/wizard (counting continues with existing config).")
+
+    if not config_path.exists():
+        print(f"ERROR: config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    sources = _start_sources(config_path)
 
     if not sources:
         print("ERROR: no sources could be opened", file=sys.stderr)
         sys.exit(1)
 
-    state = None
-    if args.web_port is not None:
+    state = web_state
+    if state is None and web_port is not None:
         from ball_counter.web import AppState, start_server_thread
         state = AppState()
+        start_server_thread(state, port=web_port, host=args.host,
+                            socket_path=web_socket, trusted_proxies=trusted)
+        print(f"Web API listening on {_web_url(args.host, web_port, web_socket)}")
+
+    if state is not None:
         for proc in sources:
             for goal in proc.goals:
                 state.update_count(goal.name, 0)
-        trusted = [p.strip() for p in args.trusted_proxies.split(",")] if args.trusted_proxies else None
-        start_server_thread(state, port=args.web_port, host=args.host, trusted_proxies=trusted)
-        print(f"Web API listening on http://{args.host}:{args.web_port}")
 
     progress_last: dict[str, int] = {}
     all_live = all(not s.is_video_file for s in sources)

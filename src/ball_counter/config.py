@@ -30,6 +30,10 @@ class GoalConfig:
     fall_ratio: float = 0.5
     cooldown: int = 0
 
+    # Processing options
+    downsample: float = 1.0                    # scale factor before MotionCounter (0.25–1.0)
+    crop_override: list[int] | None = None     # [x1,y1,x2,y2] user-set crop, overrides auto
+
 
 @dataclass
 class SourceConfig:
@@ -53,6 +57,8 @@ def _parse_goal(entry: dict) -> GoalConfig:
         min_peak=entry.get("min_peak", 0),
         fall_ratio=entry.get("fall_ratio", 0.5),
         cooldown=entry.get("cooldown", 0),
+        downsample=entry.get("downsample", 1.0),
+        crop_override=entry.get("crop_override"),
     )
 
 
@@ -87,6 +93,10 @@ def save_configs(configs: list[SourceConfig], path: Path) -> None:
             "fall_ratio": g.fall_ratio,
             "cooldown": g.cooldown,
         })
+        if g.downsample != 1.0:
+            d["downsample"] = g.downsample
+        if g.crop_override is not None:
+            d["crop_override"] = g.crop_override
         return d
 
     data = {
