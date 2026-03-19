@@ -109,3 +109,132 @@ def save_clip(
         )
 
     return mp4_path, json_path
+
+
+def trim_clip(
+    clip_id: str,
+    clips_dir: Path,
+    segments: list[dict],
+    delete_original: bool = False,
+) -> list[str]:
+    """Split a clip into one or more segments, creating new MP4+JSON for each.
+
+    Each segment dict must have ``start_frame`` and ``end_frame`` keys.
+    Returns the list of newly created clip IDs.
+    """
+    mp4_src = clips_dir / f"{clip_id}.mp4"
+    json_src = clips_dir / f"{clip_id}.json"
+    if not mp4_src.exists() or not json_src.exists():
+        raise FileNotFoundError(f"Clip {clip_id} not found")
+
+    import copy
+
+    with open(json_src) as f:
+        data = json.load(f)
+
+    src_frames = data.get("frames", [])
+    src_fps = data.get("fps", 30.0)
+    goal = data.get("goal", "unknown")
+
+    new_ids: list[str] = []
+    for i, seg in enumerate(segments):
+        # start_frame / end_frame are 0-based position indices into the frames
+        # array (matching the timeline UI), NOT the stored frame_idx values.
+        start_pos = seg["start_frame"]
+        end_pos = seg["end_frame"]
+        if end_pos <= start_pos:
+            continue
+
+        seg_frames = src_frames[start_pos:end_pos + 1]
+        if not seg_frames:
+            continue
+
+        start_sec = start_pos / src_fps
+        duration_sec = (end_pos - start_pos) / src_fps
+
+        suffix = f"_p{i + 1}" if len(segments) > 1 else "_trimmed"
+        new_id = f"{clip_id}{suffix}"
+        new_mp4 = clips_dir / f"{new_id}.mp4"
+        new_json = clips_dir / f"{new_id}.json"
+
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(mp4_src),
+                "-ss", str(start_sec),
+                "-t", str(duration_sec),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-movflags", "+faststart",
+                str(new_mp4),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Build a lookup from original frame_idx → new 0-based position
+        orig_idx_set = {fr["frame_idx"] for fr in seg_frames}
+
+        new_sidecar_frames = []
+        for pos, fr in enumerate(seg_frames):
+            nf = copy.deepcopy(fr)
+            nf["frame_idx"] = pos
+            if nf.get("event") and "frame" in nf["event"]:
+                nf["event"]["frame"] = pos
+            new_sidecar_frames.append(nf)
+
+        new_captures = []
+        for cap in data.get("captures", []):
+            if cap.get("frame_idx") in orig_idx_set:
+                nc = dict(cap)
+                # Map original frame_idx to new position
+                for pos, fr in enumerate(seg_frames):
+                    if fr["frame_idx"] == cap["frame_idx"]:
+                        nc["frame_idx"] = pos
+                        break
+                new_captures.append(nc)
+
+        new_annotations: dict = {}
+        for token, anno in (data.get("annotations") or {}).items():
+            new_marks = []
+            for m in (anno.get("marks") or []):
+                # Annotations use video_time which maps to position-based time
+                vt = m.get("video_time", 0)
+                if start_pos / src_fps <= vt <= end_pos / src_fps:
+                    nm = dict(m)
+                    nm["video_time"] = vt - start_pos / src_fps
+                    nm["frame_idx"] = round(nm["video_time"] * src_fps)
+                    new_marks.append(nm)
+            if new_marks:
+                new_annotations[token] = {
+                    "label": anno.get("label", token),
+                    "saved_at": anno.get("saved_at", ""),
+                    "marks": new_marks,
+                }
+
+        new_data = {
+            "goal": goal,
+            "saved_at": data.get("saved_at", ""),
+            "fps": src_fps,
+            "n_frames": len(new_sidecar_frames),
+            "frames": new_sidecar_frames,
+            "trimmed_from": clip_id,
+            "trim_range": {"start_pos": start_pos, "end_pos": end_pos},
+        }
+        if new_captures:
+            new_data["captures"] = new_captures
+        if new_annotations:
+            new_data["annotations"] = new_annotations
+
+        with open(new_json, "w") as f_out:
+            json.dump(new_data, f_out, indent=2)
+
+        new_ids.append(new_id)
+
+    if delete_original and new_ids:
+        mp4_src.unlink()
+        json_src.unlink()
+
+    return new_ids

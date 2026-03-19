@@ -1055,7 +1055,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 .save-btn{background:#1a4a1a;border-color:#3a3;color:#8f8}
 .save-btn:hover{background:#1e5a1e}
 #my-marks{margin-top:0.4rem}
-#my-marks-list{list-style:none;display:flex;flex-direction:column;gap:0.25rem}
+#my-marks-list{list-style:none;display:flex;flex-direction:column;gap:0.25rem;max-height:8rem;overflow-y:auto}
 .mark-item{display:flex;align-items:center;gap:0.5rem;font-size:0.8rem;padding:0.2rem 0.4rem;background:#1a1a1a;border-radius:3px;border-left:2px solid transparent;transition:background 0.1s}
 .mark-item.near{background:#1a2a3a;border-left-color:#7bf}
 .mark-time{color:#7bf;cursor:pointer;min-width:50px}
@@ -1079,6 +1079,21 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 #download-row{margin-top:0.6rem;display:flex;align-items:center;gap:0.8rem;font-size:0.8rem;color:#888}
 /* empty state */
 #empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:1rem}
+/* trim mode */
+#trim-toolbar{display:none;margin:0.4rem 0;padding:0.5rem;background:#1a1a1a;border:1px solid #333;border-radius:4px}
+#trim-toolbar.active{display:block}
+.trim-actions{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;font-size:0.82rem}
+.trim-btn{padding:0.25rem 0.6rem;font-size:0.78rem;background:#2a2a2a;border:1px solid #444;color:#ccc;border-radius:3px;cursor:pointer}
+.trim-btn:hover{background:#3a3a3a}
+.trim-btn.primary{background:#1a3a1a;border-color:#3a3;color:#8f8}
+.trim-btn.primary:hover{background:#2a5a2a}
+.trim-btn.cancel{background:#3a1a1a;border-color:#a33;color:#f88}
+.trim-btn.cancel:hover{background:#4a2020}
+#trim-segments-list{margin-top:0.4rem;font-size:0.78rem}
+.trim-seg-item{display:flex;align-items:center;gap:0.5rem;padding:0.2rem 0.4rem;background:#1a2a1a;border-radius:3px;margin-bottom:0.2rem;border-left:2px solid #3a3}
+.trim-seg-remove{background:none;border:none;color:#633;cursor:pointer;font-size:0.85rem;padding:0 0.2rem}
+.trim-seg-remove:hover{color:#f44}
+.trim-hint{color:#555;font-size:0.75rem;font-style:italic}
 /* modal */
 #modal-overlay{display:none;position:fixed;inset:0;background:#0009;z-index:100;align-items:center;justify-content:center}
 #modal-overlay.show{display:flex}
@@ -1151,6 +1166,18 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
         <button class="speed-btn" data-rate="2"    onclick="setSpeed(2)">2×</button>
         <button class="speed-btn" data-rate="4"    onclick="setSpeed(4)">4×</button>
       </div>
+      <div id="trim-toolbar">
+        <div class="trim-actions">
+          <span style="color:#888">Trim / Split</span>
+          <button class="trim-btn" onclick="autoDetectSegments()">Auto-detect</button>
+          <span class="trim-hint">or click+drag on timeline to add segments</span>
+          <span style="flex:1"></span>
+          <label style="color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.78rem"><input type="checkbox" id="trim-delete-original"/> Delete original</label>
+          <button class="trim-btn primary" onclick="applyTrim()">Apply</button>
+          <button class="trim-btn cancel" onclick="exitTrimMode()">Cancel</button>
+        </div>
+        <div id="trim-segments-list"></div>
+      </div>
       <div id="events-row">
         <span id="events-label">Events:</span>
         <span id="events-btns"></span>
@@ -1176,6 +1203,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
       </div>
       <div id="download-row">
         <a id="download-link" href="#">Download zip</a>
+        <button class="trim-btn" id="trim-enter-btn" onclick="enterTrimMode()">Trim / Split</button>
         <span style="color:#555">Shortcuts: Space=mark &nbsp; ]/[=next/prev unannotated &nbsp; ←/→=seek 2s &nbsp; 1-9=balls &nbsp; ,/.=speed down/up</span>
       </div>
     </div>
@@ -1204,6 +1232,14 @@ let myMarks = [];         // [{video_time, frame_idx, timestamp, n_balls}]
 let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
 let timelineRAF = null;
 let speedMap = null;      // Uint8Array: 0=fast(2x), 1=near-motion(1x), 2=in-motion(0.25x)
+
+// trim mode
+let trimMode = false;
+let trimSegments = [];    // [{startFrame, endFrame}, ...]
+let trimDragHandle = null; // {segIdx, edge: 'start'|'end'}
+let trimAdding = false;
+let trimAddStart = null;
+let trimAddEnd = null;
 
 function buildSpeedMap(signal, fps) {
   const buf = new Uint8Array(signal.length);
@@ -1340,6 +1376,7 @@ async function openClip(id) {
   if (!r.ok) return;
   currentClip = await r.json();
   location.hash = id;
+  if (trimMode) exitTrimMode();
   myMarks = [];
   if (myToken && currentClip.annotations && currentClip.annotations[myToken]) {
     myMarks = currentClip.annotations[myToken].marks || [];
@@ -1418,6 +1455,41 @@ function drawTimeline() {
     ctx.fill();
   }
 
+  // trim mode overlays
+  if (trimMode) {
+    const sorted = [...trimSegments].sort((a, b) => a.startFrame - b.startFrame);
+    // shade discard regions
+    ctx.fillStyle = 'rgba(60, 15, 15, 0.55)';
+    let prevX = 0;
+    for (const seg of sorted) {
+      const x1 = (seg.startFrame / nFrames) * W;
+      const x2 = (seg.endFrame / nFrames) * W;
+      if (x1 > prevX) ctx.fillRect(prevX, 0, x1 - prevX, H);
+      prevX = x2;
+    }
+    if (prevX < W) ctx.fillRect(prevX, 0, W - prevX, H);
+    // segment edge lines + handles
+    ctx.strokeStyle = '#3a3'; ctx.lineWidth = 2;
+    ctx.fillStyle = '#5d5';
+    for (const seg of sorted) {
+      const x1 = (seg.startFrame / nFrames) * W;
+      const x2 = (seg.endFrame / nFrames) * W;
+      ctx.beginPath(); ctx.moveTo(x1, 0); ctx.lineTo(x1, H); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x2, 0); ctx.lineTo(x2, H); ctx.stroke();
+      ctx.fillRect(x1 - 3, 0, 6, 8);
+      ctx.fillRect(x1 - 3, H - 8, 6, 8);
+      ctx.fillRect(x2 - 3, 0, 6, 8);
+      ctx.fillRect(x2 - 3, H - 8, 6, 8);
+    }
+    // pending segment preview
+    if (trimAdding && trimAddStart !== null && trimAddEnd !== null) {
+      const px1 = (Math.min(trimAddStart, trimAddEnd) / nFrames) * W;
+      const px2 = (Math.max(trimAddStart, trimAddEnd) / nFrames) * W;
+      ctx.fillStyle = 'rgba(40, 120, 40, 0.3)';
+      ctx.fillRect(px1, 0, px2 - px1, H);
+    }
+  }
+
   // auto-detected events (red lines)
   if (currentClip.events) {
     ctx.strokeStyle = '#e44';
@@ -1466,7 +1538,32 @@ document.addEventListener('DOMContentLoaded', () => {
     const px = e.clientX - rect.left;
     const W = rect.width;
     const fps = currentClip.fps || 30;
-    const dur = (currentClip.n_frames || 1) / fps;
+    const nFrames = currentClip.n_frames || 1;
+    const dur = nFrames / fps;
+
+    // Trim mode interactions
+    if (trimMode) {
+      const frame = Math.round((px / W) * nFrames);
+      const HANDLE_PX = 8;
+      for (let i = 0; i < trimSegments.length; i++) {
+        const seg = trimSegments[i];
+        const sx = (seg.startFrame / nFrames) * W;
+        const ex = (seg.endFrame / nFrames) * W;
+        if (Math.abs(px - sx) < HANDLE_PX) {
+          trimDragHandle = {segIdx: i, edge: 'start'};
+          e.preventDefault(); return;
+        }
+        if (Math.abs(px - ex) < HANDLE_PX) {
+          trimDragHandle = {segIdx: i, edge: 'end'};
+          e.preventDefault(); return;
+        }
+      }
+      trimAdding = true;
+      trimAddStart = frame;
+      trimAddEnd = frame;
+      e.preventDefault();
+      return;
+    }
 
     // Check if near a mark — start drag
     for (let i = 0; i < myMarks.length; i++) {
@@ -1486,6 +1583,21 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   canvas.addEventListener('mousemove', e => {
+    if (trimMode && currentClip) {
+      const rect = canvas.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const W = rect.width;
+      const nFrames = currentClip.n_frames || 1;
+      const HANDLE_PX = 8;
+      let nearHandle = false;
+      for (const seg of trimSegments) {
+        const sx = (seg.startFrame / nFrames) * W;
+        const ex = (seg.endFrame / nFrames) * W;
+        if (Math.abs(px - sx) < HANDLE_PX || Math.abs(px - ex) < HANDLE_PX) { nearHandle = true; break; }
+      }
+      canvas.style.cursor = nearHandle ? 'ew-resize' : 'crosshair';
+      return;
+    }
     if (dragMarkIdx !== null) return;
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
@@ -1498,6 +1610,26 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 document.addEventListener('mousemove', e => {
+  // Trim mode dragging
+  if (trimMode && currentClip) {
+    const canvas = document.getElementById('timeline');
+    const rect = canvas.getBoundingClientRect();
+    const px = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+    const nFrames = currentClip.n_frames || 1;
+    const frame = Math.round((px / rect.width) * nFrames);
+    if (trimDragHandle !== null) {
+      const seg = trimSegments[trimDragHandle.segIdx];
+      if (trimDragHandle.edge === 'start') seg.startFrame = Math.max(0, Math.min(frame, seg.endFrame - 1));
+      else seg.endFrame = Math.min(nFrames, Math.max(frame, seg.startFrame + 1));
+      drawTimeline();
+      return;
+    }
+    if (trimAdding) {
+      trimAddEnd = frame;
+      drawTimeline();
+      return;
+    }
+  }
   if (dragMarkIdx === null || !currentClip) return;
   const canvas = document.getElementById('timeline');
   const rect = canvas.getBoundingClientRect();
@@ -1512,6 +1644,40 @@ document.addEventListener('mousemove', e => {
 });
 
 document.addEventListener('mouseup', () => {
+  // Trim mode
+  if (trimMode) {
+    if (trimDragHandle !== null) {
+      trimDragHandle = null;
+      renderTrimSegments();
+      drawTimeline();
+    }
+    if (trimAdding && trimAddStart !== null && trimAddEnd !== null) {
+      const sf = Math.min(trimAddStart, trimAddEnd);
+      const ef = Math.max(trimAddStart, trimAddEnd);
+      const nFrames = currentClip ? currentClip.n_frames || 1 : 1;
+      if (ef - sf > Math.round(nFrames * 0.005)) {
+        trimSegments.push({startFrame: sf, endFrame: ef});
+        trimSegments.sort((a, b) => a.startFrame - b.startFrame);
+        // merge overlapping
+        let merged = [trimSegments[0]];
+        for (let i = 1; i < trimSegments.length; i++) {
+          const prev = merged[merged.length - 1];
+          if (trimSegments[i].startFrame <= prev.endFrame) {
+            prev.endFrame = Math.max(prev.endFrame, trimSegments[i].endFrame);
+          } else {
+            merged.push(trimSegments[i]);
+          }
+        }
+        trimSegments = merged;
+        renderTrimSegments();
+      }
+    }
+    trimAdding = false;
+    trimAddStart = null;
+    trimAddEnd = null;
+    drawTimeline();
+    return;
+  }
   if (dragMarkIdx !== null) {
     dragMarkIdx = null;
     renderMyMarks();
@@ -1761,11 +1927,127 @@ function setCookie(name, val, days) {
   document.cookie = name + '=' + encodeURIComponent(val) + ';expires=' + d.toUTCString() + ';path=/';
 }
 
+// ── trim / split ──────────────────────────────────────────────────────────────
+function enterTrimMode() {
+  if (!currentClip) return;
+  trimMode = true;
+  trimSegments = [];
+  trimDragHandle = null;
+  trimAdding = false;
+  document.getElementById('trim-toolbar').classList.add('active');
+  document.getElementById('trim-enter-btn').style.display = 'none';
+  document.getElementById('anno-section').style.display = 'none';
+  drawTimeline();
+}
+
+function exitTrimMode() {
+  trimMode = false;
+  trimSegments = [];
+  trimDragHandle = null;
+  trimAdding = false;
+  trimAddStart = null;
+  trimAddEnd = null;
+  document.getElementById('trim-toolbar').classList.remove('active');
+  document.getElementById('trim-enter-btn').style.display = '';
+  document.getElementById('anno-section').style.display = '';
+  document.getElementById('trim-segments-list').innerHTML = '';
+  drawTimeline();
+}
+
+function autoDetectSegments() {
+  if (!currentClip || !currentClip.signal) return;
+  const signal = currentClip.signal;
+  const fps = currentClip.fps || 30;
+  const padFrames = Math.round(2 * fps);
+
+  // find contiguous regions where signal > 0
+  let regions = [];
+  let inRegion = false, regionStart = 0;
+  for (let i = 0; i < signal.length; i++) {
+    if (signal[i] > 0 && !inRegion) { regionStart = i; inRegion = true; }
+    else if (signal[i] === 0 && inRegion) { regions.push({s: regionStart, e: i - 1}); inRegion = false; }
+  }
+  if (inRegion) regions.push({s: regionStart, e: signal.length - 1});
+
+  if (regions.length === 0) { toast('No activity detected in signal', 'info'); return; }
+
+  // expand by padding for quiet borders
+  regions = regions.map(r => ({s: Math.max(0, r.s - padFrames), e: Math.min(signal.length - 1, r.e + padFrames)}));
+
+  // merge overlapping
+  regions.sort((a, b) => a.s - b.s);
+  let merged = [regions[0]];
+  for (let i = 1; i < regions.length; i++) {
+    const prev = merged[merged.length - 1];
+    if (regions[i].s <= prev.e) prev.e = Math.max(prev.e, regions[i].e);
+    else merged.push(regions[i]);
+  }
+
+  trimSegments = merged.map(r => ({startFrame: r.s, endFrame: r.e}));
+  renderTrimSegments();
+  drawTimeline();
+  toast('Detected ' + trimSegments.length + ' segment(s)', 'info');
+}
+
+function renderTrimSegments() {
+  const el = document.getElementById('trim-segments-list');
+  if (!currentClip) { el.innerHTML = ''; return; }
+  const fps = currentClip.fps || 30;
+  el.innerHTML = trimSegments.map((seg, i) => {
+    const s = (seg.startFrame / fps).toFixed(1);
+    const e = (seg.endFrame / fps).toFixed(1);
+    const d = ((seg.endFrame - seg.startFrame) / fps).toFixed(1);
+    return '<div class="trim-seg-item">' +
+      '<button class="trim-seg-remove" onclick="removeTrimSegment(' + i + ')">&#x2715;</button>' +
+      '<span>Part ' + (i + 1) + ': ' + s + 's &#x2013; ' + e + 's (' + d + 's)</span>' +
+    '</div>';
+  }).join('');
+}
+
+function removeTrimSegment(i) {
+  trimSegments.splice(i, 1);
+  renderTrimSegments();
+  drawTimeline();
+}
+
+async function applyTrim() {
+  if (!currentClip || trimSegments.length === 0) { toast('No segments defined', 'err'); return; }
+  const deleteOriginal = document.getElementById('trim-delete-original').checked;
+  const btn = document.querySelector('#trim-toolbar .primary');
+  btn.disabled = true;
+  btn.textContent = 'Processing\u2026';
+  try {
+    const r = await fetch('/api/clips/' + currentClip.id + '/trim', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        segments: trimSegments.map(s => ({start_frame: s.startFrame, end_frame: s.endFrame})),
+        delete_original: deleteOriginal,
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().then(d => d.detail || JSON.stringify(d)).catch(() => r.statusText);
+      toast('Trim failed: ' + detail, 'err', 5000);
+      return;
+    }
+    const data = await r.json();
+    toast('Created ' + data.new_ids.length + ' clip(s)', 'ok');
+    exitTrimMode();
+    await loadClips();
+    renderClipList();
+    if (data.new_ids.length > 0) openClip(data.new_ids[0]);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Apply';
+  }
+}
+
 // ── keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   const video = document.getElementById('video');
+  if (e.code === 'Escape' && trimMode) { e.preventDefault(); exitTrimMode(); return; }
   if (e.code === 'Space') { e.preventDefault(); markScore(); }
   else if (e.code === 'BracketRight') { e.preventDefault(); nextUnannotated(); }
   else if (e.code === 'ArrowLeft') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 2); }
@@ -2205,6 +2487,30 @@ def create_app(state: AppState) -> FastAPI:
                 rv[token] = any(abs((m.get("video_time") or 0) - t) <= 2.0 for m in marks)
             result_events.append({"time": t, "reviewers": rv})
         return {"reviewers": reviewer_tokens, "events": result_events}
+
+    @app.post("/api/clips/{clip_id}/trim")
+    def api_clip_trim(clip_id: str, body: dict):
+        from ball_counter.clips import trim_clip
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        jsn = clips_dir / (clip_id + ".json")
+        if not jsn.exists():
+            raise HTTPException(status_code=404, detail="Clip not found")
+        segments = body.get("segments")
+        if not segments or not isinstance(segments, list):
+            raise HTTPException(status_code=400, detail="segments list is required")
+        for seg in segments:
+            if "start_frame" not in seg or "end_frame" not in seg:
+                raise HTTPException(status_code=400, detail="Each segment needs start_frame and end_frame")
+        delete_original = body.get("delete_original", False)
+        try:
+            new_ids = trim_clip(clip_id, clips_dir, segments, delete_original=delete_original)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        return {"ok": True, "new_ids": new_ids}
 
     # ------------------------------------------------------------------ wizard
 
