@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 _wizard_frames: dict[str, tuple[bytes, float]] = {}  # token -> (jpeg, created_at)
 _wizard_config_path: str | None = None
 _wizard_existing_configs: list | None = None  # list[SourceConfig] for pre-population
+_wizard_existing_pfms = None                  # PfmsConfig | None for pre-population
 _wizard_saved: bool = False  # set True after save so redirect deactivates
 _wizard_done_event: "threading.Event | None" = None  # signalled when wizard saves
 _WIZARD_TOKEN_TTL = 600  # seconds
@@ -28,10 +29,13 @@ def set_wizard_state(
     config_path: str,
     existing_configs: list | None = None,
     done_event: "threading.Event | None" = None,
+    pfms=None,
 ) -> None:
-    global _wizard_config_path, _wizard_existing_configs, _wizard_saved, _wizard_done_event
+    global _wizard_config_path, _wizard_existing_configs, _wizard_existing_pfms
+    global _wizard_saved, _wizard_done_event
     _wizard_config_path = config_path
     _wizard_existing_configs = existing_configs
+    _wizard_existing_pfms = pfms
     _wizard_saved = False
     _wizard_done_event = done_event
 
@@ -342,6 +346,14 @@ button.primary:hover{background:#1e5a94}
 <div class="panel" id="panel-4">
   <div id="goal-list"></div>
   <div id="ram-summary"></div>
+  <details style="margin-top:1rem;border:1px solid #333;border-radius:6px;padding:0.6rem 0.8rem">
+    <summary style="cursor:pointer;font-weight:bold;color:#aaa">PFMS Integration <small style="font-weight:normal;color:#666">(optional)</small></summary>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem;margin-top:0.6rem">
+      <div class="field-group full"><label>PFMS Server URL</label><input type="text" id="pfms-url" placeholder="http://pfms.tsl" value=""/></div>
+      <div class="field-group"><label>API Key</label><input type="password" id="pfms-key" placeholder="(optional)" value=""/></div>
+      <div class="field-group"><label>Source ID</label><input type="text" id="pfms-source" placeholder="ball-counter" value=""/></div>
+    </div>
+  </details>
   <div class="nav-row">
     <button onclick="goStep(3)">← Back</button>
     <button class="primary" onclick="goStep(5)">Review →</button>
@@ -779,7 +791,9 @@ function buildTunePanel() {
   <div class="field-group full"><label>Downsample</label>
     <div class="ds-row" id="ds-row-${i}"></div>
     <div style="font-size:0.78rem;color:#777;margin-top:0.2rem" id="ds-info-${i}"></div>
-  </div></div>`;
+  </div>
+  <div class="field-group full"><label>PFMS element ID <small style="color:#666">(leave blank to skip forwarding)</small></label><input type="text" class="g-pfms-element" placeholder="e.g. speaker" value="${b.pfms_element||''}"/></div>
+  </div>`;
     list.appendChild(det);
     buildDsButtons(i, b);
   });
@@ -819,8 +833,9 @@ function syncTuneToState() {
     b.ball_area = parseInt(det.querySelector('.g-ball-area').value)  || 1500;
     b.band_width= parseInt(det.querySelector('.g-band-width').value) || 10;
     b.fall_ratio= parseFloat(det.querySelector('.g-fall-ratio').value)|| 0.7;
-    b.min_peak  = parseInt(det.querySelector('.g-min-peak').value)   || 0;
-    b.cooldown  = parseInt(det.querySelector('.g-cooldown').value)   || 0;
+    b.min_peak     = parseInt(det.querySelector('.g-min-peak').value)   || 0;
+    b.cooldown     = parseInt(det.querySelector('.g-cooldown').value)   || 0;
+    b.pfms_element = det.querySelector('.g-pfms-element')?.value.trim() || null;
   });
 }
 
@@ -874,10 +889,20 @@ function buildSavePayload() {
         min_peak:g.min_peak, cooldown:g.cooldown,
       };
       if (g.downsample && g.downsample!==1.0) obj.downsample = g.downsample;
+      if (g.pfms_element) obj.pfms_element = g.pfms_element;
       return obj;
     }),
   }));
-  return {config_path: _configPath||'', streams};
+  const pfmsUrl = document.getElementById('pfms-url')?.value.trim();
+  const pfmsKey = document.getElementById('pfms-key')?.value.trim();
+  const pfmsSrc = document.getElementById('pfms-source')?.value.trim();
+  const payload = {config_path: _configPath||'', streams};
+  if (pfmsUrl) {
+    payload.pfms_url = pfmsUrl;
+    if (pfmsKey) payload.pfms_key = pfmsKey;
+    if (pfmsSrc) payload.pfms_source = pfmsSrc;
+  }
+  return payload;
 }
 
 function buildJsonPreview() {
@@ -931,7 +956,8 @@ function loadExistingBoxes(sourceUrl) {
       name:g.name||'goal', mode:g.mode||'outlet',
       ball_area:g.ball_area??1500, band_width:g.band_width??10,
       fall_ratio:g.fall_ratio??0.7, min_peak:g.min_peak??0,
-      cooldown:g.cooldown??0, downsample:g.downsample??1.0});
+      cooldown:g.cooldown??0, downsample:g.downsample??1.0,
+      pfms_element:g.pfms_element||null});
     if (g.line) existingLinesFull[id] = {p1:g.line[0], p2:g.line[1]};
   }
   redrawBoxCanvas(); updateRamEst();
@@ -939,6 +965,11 @@ function loadExistingBoxes(sourceUrl) {
 
 // ── init ──────────────────────────────────────────────────────────────────────
 fetch('/api/wizard/current-config').then(r=>r.json()).then(data => {
+  if (data.pfms_url) {
+    const el = document.getElementById('pfms-url'); if (el) el.value = data.pfms_url;
+    const ek = document.getElementById('pfms-key'); if (ek && data.pfms_key) ek.value = data.pfms_key;
+    const es = document.getElementById('pfms-source'); if (es && data.pfms_source) es.value = data.pfms_source;
+  }
   if (!data.streams||!data.streams.length) return;
   _existingConfig = data;
   const urlInput = document.getElementById('url-input');
@@ -1001,6 +1032,11 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 #timeline{width:100%;height:60px;display:block;cursor:crosshair;background:#1a1a1a;border-radius:4px}
 #autospeed-btn{position:absolute;top:4px;right:6px;font-size:0.72rem;padding:0.15rem 0.4rem;background:#1a1a1a88;border:1px solid #555;color:#aaa;cursor:pointer;border-radius:3px}
 #autospeed-btn.on{background:#1a3a1a88;border-color:#3a3;color:#8f8}
+#speed-btns{display:flex;gap:0.3rem;align-items:center;margin-top:0.25rem}
+#speed-btns span{font-size:0.72rem;color:#555;margin-right:0.1rem}
+.speed-btn{padding:0.15rem 0.45rem;font-size:0.78rem;background:#1e1e1e;border:1px solid #333;color:#888;border-radius:3px;cursor:pointer}
+.speed-btn:hover{background:#2a2a2a;color:#ccc}
+.speed-btn.active{background:#1a2a3a;border-color:#38a;color:#8cf}
 /* events row */
 #events-row{display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;margin:0.4rem 0;font-size:0.8rem}
 #events-label{color:#888;flex-shrink:0}
@@ -1020,7 +1056,8 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 .save-btn:hover{background:#1e5a1e}
 #my-marks{margin-top:0.4rem}
 #my-marks-list{list-style:none;display:flex;flex-direction:column;gap:0.25rem}
-.mark-item{display:flex;align-items:center;gap:0.5rem;font-size:0.8rem;padding:0.2rem 0.4rem;background:#1a1a1a;border-radius:3px}
+.mark-item{display:flex;align-items:center;gap:0.5rem;font-size:0.8rem;padding:0.2rem 0.4rem;background:#1a1a1a;border-radius:3px;border-left:2px solid transparent;transition:background 0.1s}
+.mark-item.near{background:#1a2a3a;border-left-color:#7bf}
 .mark-time{color:#7bf;cursor:pointer;min-width:50px}
 .mark-time:hover{text-decoration:underline}
 .mark-n{color:#fc8;min-width:20px}
@@ -1049,9 +1086,18 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 #modal-box h2{font-size:1rem;margin-bottom:0.8rem;color:#ccc}
 #reviewer-name-input{width:100%;background:#141414;border:1px solid #444;color:#eee;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.95rem;margin-bottom:0.6rem}
 .modal-row{display:flex;gap:0.5rem;justify-content:flex-end}
+/* toast */
+#toast-container{position:fixed;bottom:1.2rem;right:1.2rem;z-index:200;display:flex;flex-direction:column;gap:0.5rem;pointer-events:none}
+.toast{padding:0.55rem 1rem;border-radius:6px;font-size:0.85rem;color:#eee;opacity:0;transform:translateY(8px);transition:opacity 0.2s,transform 0.2s;pointer-events:none;max-width:320px}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.info{background:#1e3a5c;border:1px solid #38a}
+.toast.ok{background:#1a3a1a;border:1px solid #3a3;color:#8f8}
+.toast.err{background:#3a1a1a;border:1px solid #a33;color:#f88}
 </style>
 </head>
 <body>
+
+<div id="toast-container"></div>
 
 <!-- Nav -->
 <div id="nav">
@@ -1095,7 +1141,15 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
       <video id="video" controls></video>
       <div id="timeline-wrap">
         <canvas id="timeline"></canvas>
-        <button id="autospeed-btn" onclick="toggleAutoSpeed()">Auto-speed: OFF</button>
+        <button id="autospeed-btn" onclick="toggleAutoSpeed()">Auto-speed: ON</button>
+      </div>
+      <div id="speed-btns">
+        <span>Speed:</span>
+        <button class="speed-btn" data-rate="0.25" onclick="setSpeed(0.25)">¼×</button>
+        <button class="speed-btn" data-rate="0.5"  onclick="setSpeed(0.5)">½×</button>
+        <button class="speed-btn" data-rate="1"    onclick="setSpeed(1)">1×</button>
+        <button class="speed-btn" data-rate="2"    onclick="setSpeed(2)">2×</button>
+        <button class="speed-btn" data-rate="4"    onclick="setSpeed(4)">4×</button>
       </div>
       <div id="events-row">
         <span id="events-label">Events:</span>
@@ -1108,9 +1162,10 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
           <button class="anno-btn" onclick="markScore()">Mark score [Space]</button>
           <button class="anno-btn danger" onclick="undoMark()">Undo</button>
           <button class="anno-btn save-btn" onclick="saveAnnotations()">Save</button>
+          <label style="font-size:0.78rem;color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer"><input type="checkbox" id="auto-advance" onchange="localStorage.setItem('pref_autoadvance',this.checked)"/> auto-advance</label>
         </div>
         <div id="my-marks">
-          <div style="font-size:0.78rem;color:#666;margin-bottom:0.2rem">My marks:</div>
+          <div style="font-size:0.78rem;color:#666;margin-bottom:0.2rem">My marks: <span id="my-marks-count" style="color:#fc8;font-weight:bold"></span></div>
           <ul id="my-marks-list"></ul>
         </div>
         <div id="other-reviewers"></div>
@@ -1121,7 +1176,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
       </div>
       <div id="download-row">
         <a id="download-link" href="#">Download zip</a>
-        <span style="color:#555">Shortcuts: Space=mark &nbsp; ]/[=next/prev unannotated &nbsp; ←/→=seek 2s &nbsp; 1-9=balls</span>
+        <span style="color:#555">Shortcuts: Space=mark &nbsp; ]/[=next/prev unannotated &nbsp; ←/→=seek 2s &nbsp; 1-9=balls &nbsp; ,/.=speed down/up</span>
       </div>
     </div>
   </div>
@@ -1146,12 +1201,45 @@ let reviewers = {};
 let currentClip = null;   // sidecar JSON
 let myToken = null;
 let myMarks = [];         // [{video_time, frame_idx, timestamp, n_balls}]
-let autoSpeed = false;
+let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
 let timelineRAF = null;
+let speedMap = null;      // Uint8Array: 0=fast(2x), 1=near-motion(1x), 2=in-motion(0.25x)
+
+function buildSpeedMap(signal, fps) {
+  const buf = new Uint8Array(signal.length);
+  const window = Math.round(3 * fps);
+  for (let i = 0; i < signal.length; i++) {
+    if (signal[i] > 0) {
+      buf[i] = 2; // in-motion
+      const lo = Math.max(0, i - window);
+      const hi = Math.min(signal.length - 1, i + window);
+      for (let j = lo; j <= hi; j++) if (buf[j] < 1) buf[j] = 1; // near-motion
+    }
+  }
+  return buf;
+}
+
+// ── toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'info', durationMs = 3500) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  const container = document.getElementById('toast-container');
+  container.appendChild(el);
+  requestAnimationFrame(() => { requestAnimationFrame(() => { el.classList.add('show'); }); });
+  setTimeout(() => {
+    el.classList.remove('show');
+    el.addEventListener('transitionend', () => el.remove(), {once: true});
+  }, durationMs);
+}
 
 // ── init ──────────────────────────────────────────────────────────────────────
 async function init() {
-  myToken = getCookie('reviewer_token') || null;
+  myToken = getCookie('reviewer_token') || localStorage.getItem('reviewer_token') || null;
+  const cb = document.getElementById('auto-advance');
+  if (cb) cb.checked = localStorage.getItem('pref_autoadvance') === 'true';
+  updateAutoSpeedBtn();
+  updateSpeedBtns(1);
   await loadReviewers();
   await loadClips();
   renderClipList();
@@ -1184,7 +1272,7 @@ async function loadReviewers() {
 function onReviewerChange() {
   const sel = document.getElementById('reviewer-select');
   myToken = sel.value || null;
-  if (myToken) setCookie('reviewer_token', myToken, 365);
+  if (myToken) { setCookie('reviewer_token', myToken, 365); localStorage.setItem('reviewer_token', myToken); }
   if (currentClip) openClip(currentClip.id);
 }
 
@@ -1198,6 +1286,7 @@ async function createReviewer() {
   const data = await r.json();
   myToken = data.token;
   setCookie('reviewer_token', myToken, 365);
+  localStorage.setItem('reviewer_token', myToken);
   hideModal();
   await loadReviewers();
   if (currentClip) openClip(currentClip.id);
@@ -1275,8 +1364,9 @@ async function openClip(id) {
   drawTimeline();
   video.ontimeupdate = () => drawTimeline();
 
-  // autospeed
-  if (autoSpeed) { video.playbackRate = 1; autoSpeed = false; updateAutoSpeedBtn(); }
+  // autospeed — reset rate when clip changes but keep the toggle state
+  video.playbackRate = 1;
+  speedMap = currentClip.signal ? buildSpeedMap(currentClip.signal, currentClip.fps || 30) : null;
 
   // events row
   renderEventsRow();
@@ -1357,22 +1447,118 @@ function drawTimeline() {
   }
 }
 
+let dragMarkIdx = null;
+
+function timelineFracToTime(frac) {
+  if (!currentClip) return 0;
+  const fps = currentClip.fps || 30;
+  const dur = (currentClip.n_frames || 1) / fps;
+  return Math.max(0, Math.min(dur, frac * dur));
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('timeline').addEventListener('click', e => {
+  const canvas = document.getElementById('timeline');
+  const SNAP_PX = 8;
+
+  canvas.addEventListener('mousedown', e => {
+    if (!currentClip) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const W = rect.width;
+    const fps = currentClip.fps || 30;
+    const dur = (currentClip.n_frames || 1) / fps;
+
+    // Check if near a mark — start drag
+    for (let i = 0; i < myMarks.length; i++) {
+      const mx = (myMarks[i].video_time / dur) * W;
+      if (Math.abs(px - mx) < SNAP_PX) {
+        dragMarkIdx = i;
+        e.preventDefault();
+        return;
+      }
+    }
+
+    // Normal seek
     const video = document.getElementById('video');
     if (!video.duration) return;
-    const canvas = document.getElementById('timeline');
-    const rect = canvas.getBoundingClientRect();
-    const frac = (e.clientX - rect.left) / rect.width;
-    video.currentTime = frac * video.duration;
+    video.currentTime = timelineFracToTime(px / W);
     drawTimeline();
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (dragMarkIdx !== null) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const W = rect.width;
+    const fps = currentClip ? currentClip.fps || 30 : 30;
+    const dur = currentClip ? (currentClip.n_frames || 1) / fps : 1;
+    const nearMark = myMarks.some(m => Math.abs((m.video_time / dur) * W - px) < SNAP_PX);
+    canvas.style.cursor = nearMark ? 'ew-resize' : 'crosshair';
   });
 });
 
+document.addEventListener('mousemove', e => {
+  if (dragMarkIdx === null || !currentClip) return;
+  const canvas = document.getElementById('timeline');
+  const rect = canvas.getBoundingClientRect();
+  const px = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+  const fps = currentClip.fps || 30;
+  const dur = (currentClip.n_frames || 1) / fps;
+  const newTime = (px / rect.width) * dur;
+  myMarks[dragMarkIdx].video_time = newTime;
+  myMarks[dragMarkIdx].frame_idx = Math.round(newTime * fps);
+  document.getElementById('video').currentTime = newTime;
+  drawTimeline();
+});
+
+document.addEventListener('mouseup', () => {
+  if (dragMarkIdx !== null) {
+    dragMarkIdx = null;
+    renderMyMarks();
+  }
+});
+
 // ── auto-speed ────────────────────────────────────────────────────────────────
+const SPEEDS = [0.25, 0.5, 1, 2, 4];
+
+function setSpeed(rate) {
+  autoSpeed = false;
+  localStorage.setItem('pref_autospeed', 'false');
+  document.getElementById('video').playbackRate = rate;
+  updateAutoSpeedBtn();
+  updateSpeedBtns(rate);
+}
+
+function stepSpeed(delta) {
+  const video = document.getElementById('video');
+  const cur = video.playbackRate;
+  const idx = SPEEDS.indexOf(cur);
+  const next = idx < 0
+    ? SPEEDS[delta > 0 ? SPEEDS.length - 1 : 0]
+    : SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1, idx + delta))];
+  setSpeed(next);
+}
+
+function updateSpeedBtns(rate) {
+  const row = document.getElementById('speed-btns');
+  if (!row) return;
+  row.style.display = autoSpeed ? 'none' : 'flex';
+  row.querySelectorAll('.speed-btn').forEach(btn => {
+    btn.classList.toggle('active', parseFloat(btn.dataset.rate) === rate);
+  });
+}
+
 function toggleAutoSpeed() {
   autoSpeed = !autoSpeed;
+  localStorage.setItem('pref_autospeed', autoSpeed);
   updateAutoSpeedBtn();
+  if (!autoSpeed) {
+    const video = document.getElementById('video');
+    video.playbackRate = 1;
+    updateSpeedBtns(1);
+  } else {
+    document.getElementById('speed-btns').style.display = 'none';
+  }
 }
 
 function updateAutoSpeedBtn() {
@@ -1381,16 +1567,42 @@ function updateAutoSpeedBtn() {
   btn.classList.toggle('on', autoSpeed);
 }
 
-// Poll every 100ms for auto-speed logic
+// Poll every 100ms: auto-speed + highlight closest mark
 setInterval(() => {
-  if (!autoSpeed || !currentClip) return;
+  if (!currentClip) return;
   const video = document.getElementById('video');
-  if (!video.duration) return;
   const fps = currentClip.fps || 30;
-  const signal = currentClip.signal || [];
-  const frameIdx = Math.round(video.currentTime * fps);
-  const sig = signal[Math.min(frameIdx, signal.length - 1)] || 0;
-  video.playbackRate = sig < 30 ? 4 : 1;
+
+  // auto-speed
+  if (autoSpeed && speedMap && video.duration && !video.paused) {
+    const frameIdx = Math.min(Math.round(video.currentTime * fps), speedMap.length - 1);
+    // Look ahead by the distance we'll travel before the next poll (plus a small buffer)
+    // so we never overshoot a zone boundary at high speed.
+    const lookaheadSec = Math.max(video.playbackRate * 0.12, 0.3);
+    const lookaheadFrames = Math.round(lookaheadSec * fps);
+    let worstZone = 0;
+    for (let f = frameIdx; f <= Math.min(frameIdx + lookaheadFrames, speedMap.length - 1); f++) {
+      if (speedMap[f] > worstZone) worstZone = speedMap[f];
+    }
+    if (worstZone === 2) video.playbackRate = 0.25;
+    else if (worstZone === 1) video.playbackRate = 1;
+    else video.playbackRate = 2;
+  }
+
+  // highlight closest mark row
+  const cur = video.currentTime;
+  let closestIdx = -1, closestDist = 3.0;
+  for (let i = 0; i < myMarks.length; i++) {
+    const d = Math.abs(myMarks[i].video_time - cur);
+    if (d < closestDist) { closestDist = d; closestIdx = i; }
+  }
+  document.querySelectorAll('.mark-item').forEach(el => {
+    const near = parseInt(el.dataset.idx) === closestIdx;
+    if (el.classList.contains('near') !== near) {
+      el.classList.toggle('near', near);
+      if (near) el.scrollIntoView({block: 'nearest'});
+    }
+  });
 }, 100);
 
 // ── events row ────────────────────────────────────────────────────────────────
@@ -1415,9 +1627,12 @@ function markScore() {
   const video = document.getElementById('video');
   const n = parseInt(document.getElementById('n-balls-input').value) || 1;
   const fps = currentClip.fps || 30;
-  const frameIdx = Math.round(video.currentTime * fps);
+  // 150ms of wall time converted to video time (reaction-time compensation)
+  const lag = 0.150 * (video.playbackRate || 1);
+  const videoTime = Math.max(0, video.currentTime - lag);
+  const frameIdx = Math.round(videoTime * fps);
   const now = new Date().toISOString();
-  myMarks.push({video_time: video.currentTime, frame_idx: frameIdx, timestamp: now, n_balls: n});
+  myMarks.push({video_time: videoTime, frame_idx: frameIdx, timestamp: now, n_balls: n});
   renderMyMarks();
   drawTimeline();
 }
@@ -1429,16 +1644,20 @@ function undoMark() {
 }
 
 function renderMyMarks() {
+  myMarks.sort((a, b) => a.frame_idx - b.frame_idx);
   const ul = document.getElementById('my-marks-list');
   ul.innerHTML = '';
+  const total = myMarks.reduce((s, m) => s + (m.n_balls || 1), 0);
+  const countEl = document.getElementById('my-marks-count');
+  if (countEl) countEl.textContent = myMarks.length ? total + ' balls' : '';
   myMarks.forEach((m, i) => {
     const li = document.createElement('li');
     li.className = 'mark-item';
+    li.dataset.idx = i;
     li.innerHTML =
-      '<span class="mark-time" onclick="seekTo(' + m.video_time + ')">' + m.video_time.toFixed(2) + 's</span>' +
-      '<span class="mark-n">' + m.n_balls + 'b</span>' +
-      '<span class="mark-ts">' + esc(m.timestamp) + '</span>' +
-      '<button class="mark-del" onclick="deleteMark(' + i + ')">&#x2715;</button>';
+      '<button class="mark-del" onclick="deleteMark(' + i + ')">&#x2715;</button>' +
+      '<span class="mark-time" onclick="seekTo(' + m.video_time + ')">frame ' + m.frame_idx + '</span>' +
+      '<span class="mark-n">' + m.n_balls + 'b</span>';
     ul.appendChild(li);
   });
 }
@@ -1465,7 +1684,7 @@ function renderOtherReviewers() {
       const div = document.createElement('div');
       div.className = 'other-mark-item';
       div.innerHTML =
-        '<span class="other-mark-time" onclick="seekTo(' + (m.video_time || 0) + ')">' + (m.video_time || 0).toFixed(2) + 's</span>' +
+        '<span class="other-mark-time" onclick="seekTo(' + (m.video_time || 0) + ')">frame ' + (m.frame_idx || 0) + '</span>' +
         '<span style="color:#fc8;min-width:20px">' + m.n_balls + 'b</span>' +
         '<span style="color:#555;font-size:0.72rem">' + esc(m.timestamp || '') + '</span>';
       container.appendChild(div);
@@ -1474,21 +1693,25 @@ function renderOtherReviewers() {
 }
 
 async function saveAnnotations() {
-  if (!currentClip || !myToken) { alert('Select a reviewer first.'); return; }
+  if (!currentClip || !myToken) { toast('Select a reviewer first.', 'err'); return; }
   const label = (reviewers[myToken] && reviewers[myToken].label) || myToken;
   const r = await fetch('/api/clips/' + currentClip.id + '/annotations', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({token: myToken, label, marks: myMarks})
   });
   if (r.ok) {
+    toast('Annotations saved.', 'ok');
     // refresh clip list to update annotators
     await loadClips();
-    renderClipList();
     const idx = allClips.findIndex(c => c.id === currentClip.id);
     if (idx >= 0 && !allClips[idx].annotators.includes(myToken)) allClips[idx].annotators.push(myToken);
     renderClipList();
+    if (document.getElementById('auto-advance')?.checked) {
+      nextUnannotated();
+    }
   } else {
-    alert('Save failed: ' + (await r.text()));
+    const detail = await r.json().then(d => d.detail || JSON.stringify(d)).catch(() => r.statusText);
+    toast('Save failed: ' + detail, 'err', 5000);
   }
 }
 
@@ -1548,6 +1771,8 @@ document.addEventListener('keydown', e => {
   else if (e.code === 'ArrowLeft') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 2); }
   else if (e.code === 'ArrowRight') { e.preventDefault(); video.currentTime = Math.min(video.duration||0, video.currentTime + 2); }
   else if (e.key >= '1' && e.key <= '9') { document.getElementById('n-balls-input').value = e.key; }
+  else if (e.code === 'Comma') { e.preventDefault(); stepSpeed(-1); }
+  else if (e.code === 'Period') { e.preventDefault(); stepSpeed(1); }
 });
 
 init();
@@ -1832,7 +2057,8 @@ def create_app(state: AppState) -> FastAPI:
             n_frames = data.get("n_frames") or 0
             fps = data.get("fps") or 30.0
             duration = n_frames / fps if n_frames and fps else None
-            events = data.get("events") or []
+            frames = data.get("frames") or []
+            events = [f for f in frames if f.get("event") is not None]
             captures = data.get("captures") or []
             annotations = data.get("annotations") or {}
             annotators = list(annotations.keys())
@@ -1882,7 +2108,17 @@ def create_app(state: AppState) -> FastAPI:
         jsn = clips_dir / (clip_id + ".json")
         if not jsn.exists():
             raise HTTPException(status_code=404, detail="Clip not found")
-        return json.loads(jsn.read_text())
+        d = json.loads(jsn.read_text())
+        d["id"] = clip_id
+        # Flatten per-frame signal array and events list for UI consumption
+        frames = d.get("frames") or []
+        if frames and "signal" not in d:
+            d["signal"] = [f.get("signal", 0) for f in frames]
+            d["events"] = [
+                {"frame_idx": f["frame_idx"], **(f["event"] or {})}
+                for f in frames if f.get("event") is not None
+            ]
+        return d
 
     @app.get("/api/clips/{clip_id}/video")
     def api_clip_video(clip_id: str):
@@ -2060,9 +2296,17 @@ def create_app(state: AppState) -> FastAPI:
                     gd["roi_points"] = g.roi_points
                 if g.crop_override:
                     gd["crop_override"] = g.crop_override
+                if g.pfms_element:
+                    gd["pfms_element"] = g.pfms_element
                 goals.append(gd)
             streams.append({"source": src.source, "goals": goals})
-        return {"streams": streams}
+        result: dict = {"streams": streams}
+        if _wizard_existing_pfms is not None:
+            result["pfms_url"] = _wizard_existing_pfms.url
+            if _wizard_existing_pfms.key:
+                result["pfms_key"] = _wizard_existing_pfms.key
+            result["pfms_source"] = _wizard_existing_pfms.source
+        return result
 
     @app.get("/api/wizard/config-path")
     def wizard_config_path_route():
@@ -2074,18 +2318,16 @@ def create_app(state: AppState) -> FastAPI:
         if not config_path:
             return JSONResponse({"error": "config_path is required"}, status_code=400)
         streams_data = body.get("streams", [])
-        from ball_counter.config import GoalConfig, SourceConfig, save_configs
+        from ball_counter.config import GoalConfig, PfmsConfig, SourceConfig, save_configs
         configs = []
         for s in streams_data:
             goals = []
             for g in s.get("goals", []):
-                line = g.get("line")
-                roi = g.get("roi_points", [])
                 goals.append(GoalConfig(
                     name=g.get("name", "goal"),
                     mode=g.get("mode", "outlet"),
-                    line=line,
-                    roi_points=roi,
+                    line=g.get("line"),
+                    roi_points=g.get("roi_points", []),
                     hsv_low=tuple(g.get("hsv_low", [20, 100, 100])),
                     hsv_high=tuple(g.get("hsv_high", [35, 255, 255])),
                     draw_color=tuple(g.get("draw_color", [0, 0, 255])),
@@ -2096,11 +2338,19 @@ def create_app(state: AppState) -> FastAPI:
                     cooldown=g.get("cooldown", 0),
                     downsample=g.get("downsample", 1.0),
                     crop_override=g.get("crop_override"),
+                    pfms_element=g.get("pfms_element") or None,
                 ))
             configs.append(SourceConfig(source=s["source"], goals=goals))
+        pfms_cfg = None
+        if body.get("pfms_url"):
+            pfms_cfg = PfmsConfig(
+                url=body["pfms_url"],
+                key=body.get("pfms_key") or None,
+                source=body.get("pfms_source") or "ball-counter",
+            )
         path = Path(config_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        save_configs(configs, path)
+        save_configs(configs, path, pfms=pfms_cfg)
         global _wizard_saved, _wizard_done_event
         _wizard_saved = True
         if _wizard_done_event is not None:

@@ -6,6 +6,14 @@ from pathlib import Path
 
 
 @dataclass
+class PfmsConfig:
+    """Optional PFMS score-forwarding configuration (top-level)."""
+    url: str
+    key: str | None = None
+    source: str = "ball-counter"
+
+
+@dataclass
 class GoalConfig:
     """Configuration for a single counting zone (goal) on a stream."""
 
@@ -34,6 +42,9 @@ class GoalConfig:
     downsample: float = 1.0                    # scale factor before MotionCounter (0.25–1.0)
     crop_override: list[int] | None = None     # [x1,y1,x2,y2] user-set crop, overrides auto
 
+    # PFMS integration
+    pfms_element: str | None = None            # PFMS element ID; None = skip forwarding
+
 
 @dataclass
 class SourceConfig:
@@ -59,11 +70,26 @@ def _parse_goal(entry: dict) -> GoalConfig:
         cooldown=entry.get("cooldown", 0),
         downsample=entry.get("downsample", 1.0),
         crop_override=entry.get("crop_override"),
+        pfms_element=entry.get("pfms_element"),
     )
 
 
-def load_configs(path: Path) -> list[SourceConfig]:
-    """Load source configurations from a JSON file."""
+def _parse_pfms(data: dict) -> PfmsConfig | None:
+    url = data.get("pfms_url")
+    if not url:
+        return None
+    return PfmsConfig(
+        url=url,
+        key=data.get("pfms_key") or None,
+        source=data.get("pfms_source", "ball-counter"),
+    )
+
+
+def load_configs(path: Path) -> tuple[list[SourceConfig], PfmsConfig | None]:
+    """Load source configurations from a JSON file.
+
+    Returns (sources, pfms_config). pfms_config is None if not configured.
+    """
     with open(path) as f:
         data = json.load(f)
 
@@ -71,10 +97,11 @@ def load_configs(path: Path) -> list[SourceConfig]:
     for entry in data["streams"]:
         goals = [_parse_goal(g) for g in entry["goals"]]
         sources.append(SourceConfig(source=entry["source"], goals=goals))
-    return sources
+    return sources, _parse_pfms(data)
 
 
-def save_configs(configs: list[SourceConfig], path: Path) -> None:
+def save_configs(configs: list[SourceConfig], path: Path,
+                 pfms: PfmsConfig | None = None) -> None:
     """Save source configurations to a JSON file."""
 
     def _goal_dict(g: GoalConfig) -> dict:
@@ -97,14 +124,22 @@ def save_configs(configs: list[SourceConfig], path: Path) -> None:
             d["downsample"] = g.downsample
         if g.crop_override is not None:
             d["crop_override"] = g.crop_override
+        if g.pfms_element:
+            d["pfms_element"] = g.pfms_element
         return d
 
-    data = {
+    data: dict = {
         "streams": [
             {"source": s.source, "goals": [_goal_dict(g) for g in s.goals]}
             for s in configs
         ]
     }
+    if pfms is not None:
+        data["pfms_url"] = pfms.url
+        if pfms.key:
+            data["pfms_key"] = pfms.key
+        if pfms.source != "ball-counter":
+            data["pfms_source"] = pfms.source
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     print(f"Config saved to {path}")

@@ -60,8 +60,8 @@ def _web_url(host: str, port: int | None, socket: str | None) -> str:
     return f"http://{host}:{port}"
 
 
-def _start_sources(config_path: Path) -> list[SourceProcessor]:
-    configs = load_configs(config_path)
+def _start_sources(config_path: Path) -> tuple[list[SourceProcessor], object]:
+    configs, pfms = load_configs(config_path)
     sources: list[SourceProcessor] = []
     for config in configs:
         ready_goals = [g for g in config.goals if g.line or g.roi_points]
@@ -79,7 +79,7 @@ def _start_sources(config_path: Path) -> list[SourceProcessor]:
         goal_names = ", ".join(g.name for g in proc.goals)
         print(f"[{config.source}] connected — goals: {goal_names}")
         sources.append(proc)
-    return sources
+    return sources, pfms
 
 
 def run(args: argparse.Namespace) -> None:
@@ -104,10 +104,11 @@ def run(args: argparse.Namespace) -> None:
         from ball_counter import web as _web
         from ball_counter.web import AppState, start_server_thread
         existing = None
+        existing_pfms = None
         if not config_missing:
-            existing = load_configs(config_path)
+            existing, existing_pfms = load_configs(config_path)
         wizard_done = threading.Event()
-        _web.set_wizard_state(str(config_path), existing, wizard_done)
+        _web.set_wizard_state(str(config_path), existing, wizard_done, pfms=existing_pfms)
         web_state = AppState()
         start_server_thread(web_state, port=web_port, host=args.host,
                             socket_path=web_socket, trusted_proxies=trusted)
@@ -123,7 +124,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"ERROR: config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    sources = _start_sources(config_path)
+    sources, pfms_cfg = _start_sources(config_path)
 
     if not sources:
         print("ERROR: no sources could be opened", file=sys.stderr)
@@ -136,6 +137,12 @@ def run(args: argparse.Namespace) -> None:
         start_server_thread(state, port=web_port, host=args.host,
                             socket_path=web_socket, trusted_proxies=trusted)
         print(f"Web API listening on {_web_url(args.host, web_port, web_socket)}")
+
+    forwarder = None
+    if pfms_cfg is not None:
+        from ball_counter.pfms import PfmsForwarder
+        forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source)
+        print(f"PFMS integration enabled → {pfms_cfg.url}")
 
     if state is not None:
         state.set_clips_dir(config_path.parent / "clips")
@@ -191,6 +198,14 @@ def run(args: argparse.Namespace) -> None:
                     print(f"[{goal.name}] score at {ts}: +{event.n_balls} (total: {goal.count})")
                     if state is not None:
                         state.emit_event(goal.name, event.n_balls, goal.count, ts)
+                    if forwarder and goal.config.pfms_element:
+                        alliance = ("red" if "red" in goal.name
+                                    else "blue" if "blue" in goal.name
+                                    else None)
+                        if alliance:
+                            forwarder.send(alliance, goal.config.pfms_element, event.n_balls)
+                        else:
+                            print(f"[{goal.name}] WARNING: cannot determine alliance for PFMS")
 
         file_sources = sum(1 for s in sources if s.is_video_file)
         if frames_read == 0 and (all_live or file_sources_done >= file_sources):
