@@ -18,7 +18,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from ball_counter.config import load_configs
-from ball_counter.counter import MotionCounter
+from ball_counter.counter import MotionCounter, MotionEvent
 
 
 # ── Clip loading ──────────────────────────────────────────────────────────────
@@ -152,7 +152,8 @@ def benchmark(clips_dir: Path, config_path: Path | None, goal_filter: str | None
               tolerance: float, verbose: bool, param_overrides: dict) -> dict:
     goal_configs: dict = {}
     if config_path:
-        for src in load_configs(config_path):
+        sources, _pfms = load_configs(config_path)
+        for src in sources:
             for g in src.goals:
                 goal_configs[g.name] = g
 

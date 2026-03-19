@@ -27,11 +27,21 @@ PARAM_GRID: dict[str, list] = {
     "cooldown":   [0, 3, 5],
 }
 
+# Focused grid around best params from initial sweep
+PARAM_GRID_FINE: dict[str, list] = {
+    "ball_area":  [900],                            # doesn't affect results
+    "band_width": [5, 8, 10, 12, 15],
+    "fall_ratio": [0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
+    "min_peak":   [0, 100, 200, 300, 400, 500],
+    "cooldown":   [4, 5, 6, 7, 8, 10],
+}
+
 
 def sweep(clips_dir: Path, config_path: Path, goal_filter: str | None,
           tolerance: float, top_n: int, grid: dict[str, list]) -> None:
     goal_configs: dict = {}
-    for src in load_configs(config_path):
+    sources, _pfms = load_configs(config_path)
+    for src in sources:
         for g in src.goals:
             goal_configs[g.name] = g
 
@@ -86,7 +96,7 @@ def sweep(clips_dir: Path, config_path: Path, goal_filter: str | None,
             print(f"  {i + 1:>4}/{total}  best F1 so far: {best_f1:.3f}", end="\r")
 
     print()
-    results.sort(reverse=True)
+    results.sort(key=lambda r: (r[0], r[2], r[1]), reverse=True)
 
     col_w = 10
     header = (f"{'rank':>4}  {'F1':>6}  {'P':>6}  {'R':>6}  {'TP':>4}  {'FP':>4}  {'FN':>4}  "
@@ -114,15 +124,17 @@ def main() -> None:
     ap.add_argument("--goal", default=None, help="Filter to a single goal name")
     ap.add_argument("--tolerance", type=float, default=1.0, help="Match tolerance in seconds")
     ap.add_argument("--top", type=int, default=20, help="Show top N results")
+    ap.add_argument("--fine", action="store_true", help="Use fine-grained grid around known best params")
     args = ap.parse_args()
 
+    grid = PARAM_GRID_FINE if args.fine else PARAM_GRID
     sweep(
         Path(args.clips_dir),
         Path(args.config),
         args.goal,
         args.tolerance,
         args.top,
-        PARAM_GRID,
+        grid,
     )
 
 
