@@ -31,8 +31,13 @@ def load_annotated_clip(json_path: Path) -> dict | None:
     return d
 
 
-def get_all_marks(clip: dict) -> list[float]:
-    """Aggregate human marks from all reviewers, deduplicating within 0.5s."""
+def get_all_marks(clip: dict, dedup_window: float = 0.15) -> list[float]:
+    """Aggregate human marks from all reviewers, deduplicating within window.
+
+    With a single reviewer, marks are intentional — use a small window
+    (default 0.15s) just to catch accidental double-taps.
+    With multiple reviewers, consider a larger window.
+    """
     times = []
     for ann in clip["annotations"].values():
         for m in ann.get("marks", []):
@@ -40,7 +45,7 @@ def get_all_marks(clip: dict) -> list[float]:
     times.sort()
     deduped: list[float] = []
     for t in times:
-        if not deduped or t - deduped[-1] > 0.5:
+        if not deduped or t - deduped[-1] > dedup_window:
             deduped.append(t)
     return deduped
 
@@ -120,7 +125,9 @@ def run_detector(mp4_path: Path, goal_config, fps_hint: float = 30.0,
             break
         ev = feed(frame)
         if ev is not None:
-            event_times.append(frame_idx / actual_fps)
+            t = frame_idx / actual_fps
+            for _ in range(ev.n_balls):
+                event_times.append(t)
         frame_idx += 1
 
     cap.release()
