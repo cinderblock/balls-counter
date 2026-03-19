@@ -187,6 +187,20 @@ def run(args: argparse.Namespace) -> None:
                             state.emit_reset(goal.name)
                             print(f"[{goal.name}] count reset to 0")
 
+                for score_name, score_n in state.pop_scores():
+                    for goal in proc.goals:
+                        if goal.name == score_name:
+                            goal.counter.count += score_n
+                            state.update_count(goal.name, goal.count)
+                            state.emit_event(goal.name, score_n, goal.count, ts)
+                            print(f"[{goal.name}] manual +{score_n} (total: {goal.count})")
+                            if forwarder and goal.config.pfms_element:
+                                alliance = ("red" if "red" in goal.name
+                                            else "blue" if "blue" in goal.name
+                                            else None)
+                                if alliance:
+                                    forwarder.send(alliance, goal.config.pfms_element, score_n)
+
             for goal, event in results:
                 if state is not None:
                     state.update_count(goal.name, goal.count)

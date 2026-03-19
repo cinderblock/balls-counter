@@ -61,6 +61,7 @@ class AppState:
         self._frames: dict[str, bytes] = {}  # latest JPEG per stream
         self._event_queues: list[queue.Queue] = []
         self._pending_resets: set[str] = set()
+        self._pending_scores: list[tuple[str, int]] = []  # [(goal_name, n_balls), ...]
         self._buffers: dict = {}   # goal_name -> RollingBuffer
         self._clips_dir: "Path | None" = None
         # Live capture sessions: goal_name -> session dict
@@ -76,6 +77,18 @@ class AppState:
             resets = self._pending_resets
             self._pending_resets = set()
             return resets
+
+    def inject_score(self, name: str, n_balls: int = 1) -> None:
+        """Queue a manual score injection for the main processing loop."""
+        with self._lock:
+            self._pending_scores.append((name, n_balls))
+
+    def pop_scores(self) -> list[tuple[str, int]]:
+        """Return and clear any pending manual score injections."""
+        with self._lock:
+            scores = self._pending_scores
+            self._pending_scores = []
+            return scores
 
     def update_count(self, name: str, count: int) -> None:
         with self._lock:
@@ -2087,6 +2100,7 @@ def create_app(state: AppState) -> FastAPI:
               <div class="goal-label" style="color:{color}">{name}</div>
               <div class="count" id="count-{name}">0</div>
               <div class="btn-row">
+                <button class="score-btn" id="score-{name}" onclick="injectScore('{name}')">+1</button>
                 <button class="clear-btn" onclick="resetGoal('{name}')">Clear</button>
                 <button class="clip-btn" id="clip-{name}" onclick="saveClip('{name}')">Save last 60s</button>
                 <button class="capture-btn" id="cap-{name}" onclick="captureScore('{name}')">Capture score</button>
@@ -2119,6 +2133,9 @@ def create_app(state: AppState) -> FastAPI:
     .clear-btn:hover {{ background: #500; color: #fff; border-color: #a00; }}
     .clip-btn:hover {{ background: #135; color: #9cf; border-color: #47a; }}
     .clip-btn:disabled {{ opacity: 0.5; cursor: default; }}
+    .score-btn {{ padding: 0.3rem 0.8rem; background: #3a3a1a; color: #fd8; border: 1px solid #885; border-radius: 4px; cursor: pointer; font-size: 1rem; font-weight: bold; }}
+    .score-btn:hover {{ background: #5a5a20; color: #ff0; border-color: #aa6; }}
+    .score-btn.flash {{ background: #8a8a20; color: #fff; border-color: #ff0; }}
     .capture-btn {{ background: #1a3a1a; color: #8f8; border-color: #383; }}
     .capture-btn:hover {{ background: #2a5a2a; color: #afa; border-color: #5a5; }}
     .capture-btn.flash {{ background: #4a8a2a; color: #fff; border-color: #8f8; }}
@@ -2145,6 +2162,16 @@ def create_app(state: AppState) -> FastAPI:
         if (el) el.textContent = count;
       }}
     }});
+
+    function injectScore(name) {{
+      const btn = document.getElementById('score-' + name);
+      fetch('/api/score/' + name, {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{n_balls: 1}})}})
+        .then(() => {{
+          btn.classList.add('flash');
+          setTimeout(() => btn.classList.remove('flash'), 300);
+        }})
+        .catch(() => {{ btn.textContent = 'Error'; setTimeout(() => btn.textContent = '+1', 2000); }});
+    }}
 
     function captureScore(name) {{
       const btn = document.getElementById('cap-' + name);
@@ -2208,6 +2235,14 @@ def create_app(state: AppState) -> FastAPI:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail=f"Stream '{name}' not found")
         state.request_reset(name)
+        return {"ok": True}
+
+    @app.post("/api/score/{name}")
+    def inject_score(name: str, body: dict | None = None):
+        if name not in state.get_stream_names():
+            raise HTTPException(status_code=404, detail=f"Stream '{name}' not found")
+        n_balls = (body or {}).get("n_balls", 1)
+        state.inject_score(name, n_balls)
         return {"ok": True}
 
     @app.post("/api/clip/save")
