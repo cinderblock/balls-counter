@@ -1035,7 +1035,7 @@ a:hover{text-decoration:underline}
 .badge-annotated{background:#1a3a1a;color:#5d5;border:1px solid #3a3}
 .badge-unannotated{background:#2a2a2a;color:#888;border:1px solid #444}
 /* player */
-#player-panel{flex:1;overflow-y:auto;padding:0.8rem 1rem}
+#player-panel{flex:1;overflow-y:auto;padding:0.8rem 1rem;display:flex;flex-direction:column}
 #clip-header{margin-bottom:0.5rem;display:flex;align-items:baseline;gap:0.8rem;flex-wrap:wrap}
 #clip-title{font-size:1rem;font-weight:bold}
 #clip-subtitle{font-size:0.8rem;color:#888}
@@ -1043,28 +1043,24 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 /* timeline */
 #timeline-wrap{position:relative;margin:0.4rem 0}
 #timeline{width:100%;height:60px;display:block;cursor:crosshair;background:#1a1a1a;border-radius:4px}
-#autospeed-btn{position:absolute;top:4px;right:6px;font-size:0.72rem;padding:0.15rem 0.4rem;background:#1a1a1a88;border:1px solid #555;color:#aaa;cursor:pointer;border-radius:3px}
-#autospeed-btn.on{background:#1a3a1a88;border-color:#3a3;color:#8f8}
-#speed-btns{display:flex;gap:0.3rem;align-items:center;margin-top:0.25rem}
+#speed-btns{display:contents}
 #speed-btns span{font-size:0.72rem;color:#555;margin-right:0.1rem}
-.speed-btn{padding:0.15rem 0.45rem;font-size:0.78rem;background:#1e1e1e;border:1px solid #333;color:#888;border-radius:3px;cursor:pointer}
+.speed-btn{background:#1e1e1e;border:1px solid #333;color:#888}
 .speed-btn:hover{background:#2a2a2a;color:#ccc}
 .speed-btn.active{background:#1a2a3a;border-color:#38a;color:#8cf}
 /* events row */
-#events-row{display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;margin:0.4rem 0;font-size:0.8rem}
-#events-label{color:#888;flex-shrink:0}
-.event-btn{padding:0.2rem 0.5rem;font-size:0.78rem;background:#2a2a2a;border:1px solid #444;color:#ccc;border-radius:3px;cursor:pointer}
-.event-btn:hover{background:#3a3a3a}
-#next-unannotated{margin-left:auto;padding:0.2rem 0.6rem;font-size:0.78rem;background:#1a2a3a;border:1px solid #38a;color:#8cf;border-radius:3px;cursor:pointer}
-#next-unannotated:hover{background:#1e3a50}
 /* annotations */
 #anno-section{margin-top:0.6rem;border-top:1px solid #2a2a2a;padding-top:0.6rem}
 .anno-controls{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem}
 #n-balls-input{width:60px;background:#1e1e1e;border:1px solid #444;color:#eee;border-radius:4px;padding:0.3rem 0.5rem;font-size:0.9rem}
-.anno-btn{padding:0.3rem 0.7rem;font-size:0.82rem;background:#1a3a5c;border:1px solid #38a;color:#8cf;border-radius:4px;cursor:pointer}
-.anno-btn:hover{background:#1e4a6c}
+.anno-btn,.trim-btn,.toggle-btn,.speed-btn{padding:0.3rem 0.7rem;font-size:0.82rem;border-radius:4px;cursor:pointer}
+.anno-btn{background:#2a2a3a;border:1px solid #64a;color:#a8f}
+.anno-btn:hover{background:#3a3a4a}
 .anno-btn.danger{background:#3a1a1a;border-color:#a33;color:#f88}
 .anno-btn.danger:hover{background:#4a2020}
+.toggle-btn{display:flex;align-items:center;gap:0.3rem;background:#2a2a2a;border:1px solid #444;color:#888;cursor:pointer;user-select:none}
+.toggle-btn input{display:none}
+.toggle-btn.on{background:#1a2a3a;border-color:#38a;color:#8cf}
 .save-btn{background:#1a4a1a;border-color:#3a3;color:#8f8}
 .save-btn:hover{background:#1e5a1e}
 #my-marks{margin-top:0.4rem}
@@ -1089,14 +1085,14 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 #agreement-table th,#agreement-table td{padding:0.2rem 0.5rem;border:1px solid #2a2a2a;text-align:left}
 #agreement-table th{background:#1a1a1a;color:#888}
 /* download row */
-#download-row{margin-top:0.6rem;display:flex;align-items:center;gap:0.8rem;font-size:0.8rem;color:#888}
+#footer-bar{display:flex;align-items:center;gap:0.8rem;font-size:0.8rem;color:#888;padding:0.4rem 0;margin-top:auto;border-top:1px solid #333;flex-shrink:0}
 /* empty state */
 #empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:1rem}
 /* trim mode */
 #trim-toolbar{display:none;margin:0.4rem 0;padding:0.5rem;background:#1a1a1a;border:1px solid #333;border-radius:4px}
 #trim-toolbar.active{display:block}
 .trim-actions{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;font-size:0.82rem}
-.trim-btn{padding:0.25rem 0.6rem;font-size:0.78rem;background:#2a2a2a;border:1px solid #444;color:#ccc;border-radius:3px;cursor:pointer}
+.trim-btn{background:#2a2a2a;border:1px solid #444;color:#ccc}
 .trim-btn:hover{background:#3a3a3a}
 .trim-btn.primary{background:#1a3a1a;border-color:#3a3;color:#8f8}
 .trim-btn.primary:hover{background:#2a5a2a}
@@ -1129,16 +1125,11 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 
 <!-- Nav -->
 <div id="nav">
-  <span class="brand"><a href="/">Ball Counter</a></span>
-  <div class="tab" onclick="window.location='/'">Live</div>
-  <div class="tab active">Review</div>
+  <span class="brand">Ball Counter</span>
   <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="margin-left:auto;color:#444;font-size:0.78rem;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a>
   <div class="reviewer-bar">
     <span style="color:#666">Reviewer:</span>
-    <select id="reviewer-select" onchange="onReviewerChange()">
-      <option value="">-- select --</option>
-    </select>
-    <button style="font-size:0.78rem;padding:0.2rem 0.5rem" onclick="showModal()">+ New</button>
+    <span id="reviewer-label" style="color:#ccc;font-size:0.82rem"></span>
   </div>
 </div>
 
@@ -1154,6 +1145,13 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
         <option value="annotated">Annotated by me</option>
         <option value="unannotated">Unannotated by me</option>
       </select>
+      <select id="clip-sort" onchange="renderClipList()">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+        <option value="fewest-reviews">Fewest reviews</option>
+        <option value="most-events">Most events</option>
+      </select>
+      <div id="clip-count" style="font-size:0.72rem;color:#555;text-align:center"></div>
     </div>
     <div id="clip-list"></div>
   </div>
@@ -1165,19 +1163,12 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
       <div id="clip-header">
         <span id="clip-title"></span>
         <span id="clip-subtitle"></span>
+        <span style="flex:1"></span>
+        <a id="download-link" href="#">Download zip</a>
       </div>
       <video id="video" controls></video>
       <div id="timeline-wrap">
         <canvas id="timeline"></canvas>
-        <button id="autospeed-btn" onclick="toggleAutoSpeed()">Auto-speed: ON</button>
-      </div>
-      <div id="speed-btns">
-        <span>Speed:</span>
-        <button class="speed-btn" data-rate="0.25" onclick="setSpeed(0.25)">¼×</button>
-        <button class="speed-btn" data-rate="0.5"  onclick="setSpeed(0.5)">½×</button>
-        <button class="speed-btn" data-rate="1"    onclick="setSpeed(1)">1×</button>
-        <button class="speed-btn" data-rate="2"    onclick="setSpeed(2)">2×</button>
-        <button class="speed-btn" data-rate="4"    onclick="setSpeed(4)">4×</button>
       </div>
       <div id="trim-toolbar">
         <div class="trim-actions">
@@ -1185,25 +1176,30 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
           <button class="trim-btn" onclick="autoDetectSegments()">Auto-detect</button>
           <span class="trim-hint">or click+drag on timeline to add segments</span>
           <span style="flex:1"></span>
-          <label style="color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.78rem"><input type="checkbox" id="trim-delete-original"/> Delete original</label>
+          <label style="color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.78rem"><input type="checkbox" id="trim-delete-original" checked/>Delete original</label>
           <button class="trim-btn primary" onclick="applyTrim()">Apply</button>
           <button class="trim-btn cancel" onclick="exitTrimMode()">Cancel</button>
         </div>
         <div id="trim-segments-list"></div>
       </div>
-      <div id="events-row">
-        <span id="events-label">Events:</span>
-        <span id="events-btns"></span>
-        <button id="next-unannotated" onclick="nextUnannotated()">Next unannotated ]</button>
-      </div>
       <div id="anno-section">
         <div class="anno-controls">
-          <input id="n-balls-input" type="number" min="1" max="9" value="1" title="Number of balls"/>
-          <button class="anno-btn" onclick="markScore()">Mark score [Space]</button>
+          <label class="toggle-btn" id="auto-play-btn"><input type="checkbox" id="auto-play" onchange="localStorage.setItem('pref_autoplay',this.checked);this.parentElement.classList.toggle('on',this.checked)"/>Autoplay</label>
+          <button class="anno-btn" onclick="markScore()">Mark score</button>
           <button class="anno-btn danger" onclick="undoMark()">Undo</button>
+          <button class="anno-btn danger" onclick="clearAllMarks()">Clear all</button>
           <button class="anno-btn save-btn" onclick="saveAnnotations()">Save</button>
-          <label style="font-size:0.78rem;color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer"><input type="checkbox" id="auto-advance" onchange="localStorage.setItem('pref_autoadvance',this.checked)"/> auto-advance</label>
-          <label style="font-size:0.78rem;color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer"><input type="checkbox" id="auto-play" onchange="localStorage.setItem('pref_autoplay',this.checked)"/> autoplay</label>
+          <label class="toggle-btn" id="auto-advance-btn"><input type="checkbox" id="auto-advance" onchange="localStorage.setItem('pref_autoadvance',this.checked);this.parentElement.classList.toggle('on',this.checked)"/>Auto-next</label>
+          <span style="flex:1"></span>
+          <span id="speed-btns">
+          <button class="speed-btn" data-rate="0.25" onclick="setSpeed(0.25)">¼×</button>
+          <button class="speed-btn" data-rate="0.5"  onclick="setSpeed(0.5)">½×</button>
+          <button class="speed-btn" data-rate="1"    onclick="setSpeed(1)">1×</button>
+          <button class="speed-btn" data-rate="2"    onclick="setSpeed(2)">2×</button>
+          <button class="speed-btn" data-rate="4"    onclick="setSpeed(4)">4×</button>
+          </span>
+          <label class="toggle-btn on" id="autospeed-btn" onclick="toggleAutoSpeed()">Auto-speed</label>
+          <button class="trim-btn" id="trim-enter-btn" onclick="enterTrimMode()">Trim / Split</button>
         </div>
         <div id="my-marks">
           <div style="font-size:0.78rem;color:#666;margin-bottom:0.2rem">My marks: <span id="my-marks-count" style="color:#fc8;font-weight:bold"></span></div>
@@ -1215,11 +1211,9 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
         <h3>Agreement</h3>
         <table id="agreement-table"></table>
       </div>
-      <div id="download-row">
-        <a id="download-link" href="#">Download zip</a>
-        <button class="trim-btn" id="trim-enter-btn" onclick="enterTrimMode()">Trim / Split</button>
-        <span style="color:#555">Shortcuts: Space=mark &nbsp; Ctrl+Z=undo &nbsp; Ctrl+S=save &nbsp; ]/[=next/prev &nbsp; ←/→=seek 2s &nbsp; 1-9=balls &nbsp; ,/.=speed</span>
-      </div>
+    </div>
+    <div id="footer-bar">
+      <span style="color:#555">Shortcuts: Space=mark &nbsp; Ctrl+Z=undo &nbsp; Ctrl+S=save &nbsp; ←/→=seek 2s &nbsp; ,/.=speed</span>
     </div>
   </div>
 </div>
@@ -1227,11 +1221,13 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 <!-- Reviewer modal -->
 <div id="modal-overlay">
   <div id="modal-box">
-    <h2>Create Reviewer</h2>
-    <input id="reviewer-name-input" type="text" placeholder="Your name..." maxlength="64"/>
+    <h2>Who are you?</h2>
+    <div style="display:flex;gap:0.5rem;margin-bottom:0.6rem">
+      <input id="reviewer-team-input" type="text" inputmode="numeric" placeholder="Team #" maxlength="10" style="width:80px;background:#141414;border:1px solid #444;color:#eee;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.95rem" oninput="this.value=this.value.replace(/[^0-9*]/g,'')"/>
+      <input id="reviewer-name-input" type="text" placeholder="Your name" maxlength="64" style="flex:1;background:#141414;border:1px solid #444;color:#eee;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.95rem"/>
+    </div>
     <div class="modal-row">
-      <button onclick="hideModal()">Cancel</button>
-      <button class="anno-btn" onclick="createReviewer()">Create</button>
+      <button class="anno-btn" onclick="createReviewer()">Start reviewing</button>
     </div>
   </div>
 </div>
@@ -1288,9 +1284,9 @@ function toast(msg, type = 'info', durationMs = 3500) {
 async function init() {
   myToken = getCookie('reviewer_token') || localStorage.getItem('reviewer_token') || null;
   const cb = document.getElementById('auto-advance');
-  if (cb) cb.checked = localStorage.getItem('pref_autoadvance') === 'true';
+  if (cb) { cb.checked = localStorage.getItem('pref_autoadvance') !== 'false'; cb.parentElement.classList.toggle('on', cb.checked); }
   const ap = document.getElementById('auto-play');
-  if (ap) ap.checked = localStorage.getItem('pref_autoplay') !== 'false';
+  if (ap) { ap.checked = localStorage.getItem('pref_autoplay') !== 'false'; ap.parentElement.classList.toggle('on', ap.checked); }
   updateAutoSpeedBtn();
   updateSpeedBtns(1);
   await loadReviewers();
@@ -1300,38 +1296,35 @@ async function init() {
     const id = location.hash.slice(1);
     const clip = allClips.find(c => c.id === id);
     if (clip) openClip(id);
+  } else if (myToken) {
+    // Load a random unreviewed clip on fresh page load
+    nextUnannotated();
   }
+  // Require reviewer selection
+  if (!myToken || !reviewers[myToken]) showModal();
+  // Poll for new clips every 10s
+  setInterval(async () => {
+    const prev = allClips.length;
+    await loadClips();
+    if (allClips.length !== prev) { renderClipList(); toast('Clip list updated', 'info', 2000); }
+  }, 10000);
 }
 
 // ── reviewers ─────────────────────────────────────────────────────────────────
 async function loadReviewers() {
   const r = await fetch('/api/reviewers');
   reviewers = await r.json();
-  const sel = document.getElementById('reviewer-select');
-  sel.innerHTML = '<option value="">-- select --</option>';
-  for (const [token, info] of Object.entries(reviewers)) {
-    const opt = document.createElement('option');
-    opt.value = token;
-    opt.textContent = info.label;
-    sel.appendChild(opt);
-  }
   if (myToken && reviewers[myToken]) {
-    sel.value = myToken;
-  } else if (Object.keys(reviewers).length === 0) {
-    showModal();
+    document.getElementById('reviewer-label').textContent = reviewers[myToken].label;
   }
-}
-
-function onReviewerChange() {
-  const sel = document.getElementById('reviewer-select');
-  myToken = sel.value || null;
-  if (myToken) { setCookie('reviewer_token', myToken, 365); localStorage.setItem('reviewer_token', myToken); }
-  if (currentClip) openClip(currentClip.id);
 }
 
 async function createReviewer() {
-  const label = document.getElementById('reviewer-name-input').value.trim();
-  if (!label) return;
+  const team = (document.getElementById('reviewer-team-input').value || '').trim();
+  const name = (document.getElementById('reviewer-name-input').value || '').trim();
+  if (!name) { toast('Name is required', 'err'); return; }
+  if (!team) { toast('Team # is required', 'err'); return; }
+  const label = team === '*' ? name : team + ' ' + name;
   const r = await fetch('/api/reviewer/create', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({label})
@@ -1343,6 +1336,7 @@ async function createReviewer() {
   hideModal();
   await loadReviewers();
   if (currentClip) openClip(currentClip.id);
+  else nextUnannotated();
 }
 
 function showModal() { document.getElementById('modal-overlay').classList.add('show'); }
@@ -1357,6 +1351,7 @@ async function loadClips() {
 function renderClipList() {
   const search = document.getElementById('clip-search').value.toLowerCase();
   const filter = document.getElementById('clip-filter').value;
+  const sort = document.getElementById('clip-sort').value;
   const list = document.getElementById('clip-list');
   list.innerHTML = '';
   const filtered = allClips.filter(c => {
@@ -1365,6 +1360,12 @@ function renderClipList() {
     if (filter === 'unannotated' && myToken && c.annotators.includes(myToken)) return false;
     return true;
   });
+  if (sort === 'oldest') filtered.reverse();
+  else if (sort === 'fewest-reviews') filtered.sort((a, b) => a.annotators.length - b.annotators.length);
+  else if (sort === 'most-events') filtered.sort((a, b) => b.n_events - a.n_events);
+  // Update count
+  const myAnnotated = allClips.filter(c => myToken && c.annotators.includes(myToken)).length;
+  document.getElementById('clip-count').textContent = filtered.length + ' shown / ' + allClips.length + ' total / ' + myAnnotated + ' reviewed';
   for (const clip of filtered) {
     const div = document.createElement('div');
     div.className = 'clip-item' + (currentClip && currentClip.id === clip.id ? ' active' : '');
@@ -1424,7 +1425,6 @@ async function openClip(id) {
   speedMap = currentClip.signal ? buildSpeedMap(currentClip.signal, currentClip.fps || 30) : null;
 
   // events row
-  renderEventsRow();
 
   // marks
   renderMyMarks();
@@ -1508,14 +1508,13 @@ function drawTimeline() {
     }
   }
 
-  // auto-detected events (red lines)
+  // auto-detected events (red dots)
   if (currentClip.events) {
-    ctx.strokeStyle = '#e44';
-    ctx.lineWidth = 1.5;
+    ctx.fillStyle = '#e44';
     for (const ev of currentClip.events) {
       const t = ev.frame_idx != null ? ev.frame_idx / fps : (ev.video_time || 0);
       const x = (t / dur) * W;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, 6, 3, 0, Math.PI * 2); ctx.fill();
     }
   }
 
@@ -1726,10 +1725,13 @@ function stepSpeed(delta) {
 function updateSpeedBtns(rate) {
   const row = document.getElementById('speed-btns');
   if (!row) return;
-  row.style.display = autoSpeed ? 'none' : 'flex';
   row.querySelectorAll('.speed-btn').forEach(btn => {
+    btn.style.display = autoSpeed ? 'none' : '';
     btn.classList.toggle('active', parseFloat(btn.dataset.rate) === rate);
   });
+  // Also hide the "Speed:" label when auto-speed is on
+  const label = row.querySelector('span');
+  if (label) label.style.display = autoSpeed ? 'none' : '';
 }
 
 function toggleAutoSpeed() {
@@ -1741,14 +1743,12 @@ function toggleAutoSpeed() {
     video.playbackRate = 1;
     updateSpeedBtns(1);
   } else {
-    document.getElementById('speed-btns').style.display = 'none';
+    updateSpeedBtns(0);
   }
 }
 
 function updateAutoSpeedBtn() {
-  const btn = document.getElementById('autospeed-btn');
-  btn.textContent = 'Auto-speed: ' + (autoSpeed ? 'ON' : 'OFF');
-  btn.classList.toggle('on', autoSpeed);
+  document.getElementById('autospeed-btn').classList.toggle('on', autoSpeed);
 }
 
 // Poll every 100ms: auto-speed + highlight closest mark
@@ -1808,15 +1808,23 @@ function renderEventsRow() {
 // ── marks ──────────────────────────────────────────────────────────────────────
 function markScore() {
   if (!currentClip) return;
+  if (!myToken) { toast('Select a reviewer first.', 'err'); showModal(); return; }
   const video = document.getElementById('video');
-  const n = parseInt(document.getElementById('n-balls-input').value) || 1;
   const fps = currentClip.fps || 30;
-  // 150ms of wall time converted to video time (reaction-time compensation)
-  const lag = 0.150 * (video.playbackRate || 1);
+  // 150ms reaction-time compensation only while playing
+  const lag = video.paused ? 0 : 0.150 * (video.playbackRate || 1);
   const videoTime = Math.max(0, video.currentTime - lag);
   const frameIdx = Math.round(videoTime * fps);
-  const now = new Date().toISOString();
-  myMarks.push({video_time: videoTime, frame_idx: frameIdx, timestamp: now, n_balls: n});
+  // If a mark already exists at this frame, increment its count
+  const existing = myMarks.find(m => m.frame_idx === frameIdx);
+  if (existing) { existing.n_balls++; }
+  else { myMarks.push({video_time: videoTime, frame_idx: frameIdx, timestamp: new Date().toISOString(), n_balls: 1}); }
+  renderMyMarks();
+  drawTimeline();
+}
+
+function clearAllMarks() {
+  myMarks = [];
   renderMyMarks();
   drawTimeline();
 }
@@ -2091,10 +2099,8 @@ document.addEventListener('keydown', e => {
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   const video = document.getElementById('video');
   if (e.code === 'Space') { e.preventDefault(); markScore(); }
-  else if (e.code === 'BracketRight') { e.preventDefault(); nextUnannotated(); }
   else if (e.code === 'ArrowLeft') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 2); }
   else if (e.code === 'ArrowRight') { e.preventDefault(); video.currentTime = Math.min(video.duration||0, video.currentTime + 2); }
-  else if (e.key >= '1' && e.key <= '9') { document.getElementById('n-balls-input').value = e.key; }
   else if (e.code === 'Comma') { e.preventDefault(); stepSpeed(-1); }
   else if (e.code === 'Period') { e.preventDefault(); stepSpeed(1); }
 });
@@ -2115,7 +2121,7 @@ def create_app(state: AppState) -> FastAPI:
         allow_headers=["*"],
     )
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/live", response_class=HTMLResponse)
     def dashboard():
         if _wizard_active():
             from fastapi.responses import RedirectResponse
@@ -2173,7 +2179,7 @@ def create_app(state: AppState) -> FastAPI:
   </style>
 </head>
 <body>
-  <h1>Ball Counter <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="font-size:0.6rem;color:#444;font-weight:normal;vertical-align:middle;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a></h1>
+  <h1>Ball Counter <a href="/" style="font-size:0.7rem;color:#7bf;font-weight:normal;vertical-align:middle;margin-left:1rem">Review</a> <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="font-size:0.6rem;color:#444;font-weight:normal;vertical-align:middle;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a></h1>
   <div id="goals">{stream_cards}</div>
   <div id="log">
     <h2>Recent scores</h2>
@@ -2354,12 +2360,17 @@ def create_app(state: AppState) -> FastAPI:
 
     # ------------------------------------------------------------------ review
 
-    @app.get("/review", response_class=HTMLResponse)
+    @app.get("/", response_class=HTMLResponse)
     def review():
         if _wizard_active():
             from fastapi.responses import RedirectResponse
             return RedirectResponse("/wizard")
         return HTMLResponse(_REVIEW_HTML)
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review_redirect():
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/")
 
     @app.get("/api/reviewers")
     def api_reviewers():
@@ -2377,6 +2388,10 @@ def create_app(state: AppState) -> FastAPI:
         if not label:
             raise HTTPException(status_code=400, detail="label is required")
         reviewers = _load_reviewers(clips_dir)
+        # Return existing token if label matches
+        for token, info in reviewers.items():
+            if info.get("label") == label:
+                return {"token": token, "label": label}
         token = str(uuid.uuid4()).replace("-", "")
         from datetime import datetime as _datetime
         reviewers[token] = {"label": label, "created_at": _datetime.utcnow().isoformat() + "Z"}
@@ -2430,7 +2445,7 @@ def create_app(state: AppState) -> FastAPI:
         if clips_dir is None:
             raise HTTPException(status_code=503, detail="clips_dir not configured")
         want_annotated = annotated.lower() == "true"
-        candidates = []
+        candidates: list[tuple[str, int]] = []  # (stem, n_annotations)
         for mp4 in clips_dir.glob("*.mp4"):
             stem = mp4.stem
             jsn = clips_dir / (stem + ".json")
@@ -2443,10 +2458,13 @@ def create_app(state: AppState) -> FastAPI:
             annotations = data.get("annotations") or {}
             is_annotated = reviewer in annotations if reviewer else bool(annotations)
             if want_annotated == is_annotated:
-                candidates.append(stem)
+                candidates.append((stem, len(annotations)))
         if not candidates:
             raise HTTPException(status_code=404, detail="No matching clips")
-        return {"id": _random.choice(candidates)}
+        # Weight toward clips with fewer reviews: weight = 1 / (1 + n_annotations)
+        weights = [1.0 / (1 + n) for _, n in candidates]
+        chosen = _random.choices(candidates, weights=weights, k=1)[0]
+        return {"id": chosen[0]}
 
     @app.get("/api/clips/{clip_id}")
     def api_clip_detail(clip_id: str):
@@ -2463,8 +2481,8 @@ def create_app(state: AppState) -> FastAPI:
         if frames and "signal" not in d:
             d["signal"] = [f.get("signal", 0) for f in frames]
             d["events"] = [
-                {"frame_idx": f["frame_idx"], **(f["event"] or {})}
-                for f in frames if f.get("event") is not None
+                {"frame_idx": i, **(f["event"] or {})}
+                for i, f in enumerate(frames) if f.get("event") is not None
             ]
         return d
 
