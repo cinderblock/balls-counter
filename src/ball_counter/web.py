@@ -1245,7 +1245,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
   <div id="modal-box">
     <h2>Who are you?</h2>
     <div style="display:flex;gap:0.5rem;margin-bottom:0.6rem">
-      <input id="reviewer-team-input" type="text" inputmode="numeric" placeholder="Team #" maxlength="10" style="width:80px;background:#141414;border:1px solid #444;color:#eee;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.95rem" oninput="this.value=this.value.replace(/[^0-9*]/g,'')"/>
+      <input id="reviewer-team-input" type="text" inputmode="numeric" placeholder="Team #" maxlength="10" style="flex:1;background:#141414;border:1px solid #444;color:#eee;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.95rem;-moz-appearance:textfield;appearance:textfield" oninput="this.value=this.value.replace(/[^0-9*]/g,'')"/>
       <input id="reviewer-name-input" type="text" placeholder="Your name" maxlength="64" style="flex:1;background:#141414;border:1px solid #444;color:#eee;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.95rem"/>
     </div>
     <div class="modal-row">

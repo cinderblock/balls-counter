@@ -15,14 +15,22 @@ from ball_counter.counter import MotionCounter, MotionEvent
 class GoalProcessor:
     """Counts balls for one goal zone on a shared video frame."""
 
-    def __init__(self, config: GoalConfig):
+    def __init__(self, config: GoalConfig, ml_model_path: str | None = None):
         self.config = config
         self.counter: MotionCounter | None = None
+        self.ml_detector = None
         self.last_event: MotionEvent | None = None
         self.score_flash = 0
         self._crop_bounds: tuple[int, int, int, int] | None = None
         self._last_frame: np.ndarray | None = None
         self.buffer = RollingBuffer()
+
+        if ml_model_path is not None:
+            from ball_counter.ml_detector import MLPeakDetector
+            self.ml_detector = MLPeakDetector(
+                ml_model_path,
+                ball_area=config.ball_area,
+            )
 
     @property
     def name(self) -> str:
@@ -30,6 +38,8 @@ class GoalProcessor:
 
     @property
     def count(self) -> int:
+        if self.ml_detector is not None:
+            return self.ml_detector.count
         return self.counter.count if self.counter else 0
 
     @property
@@ -73,6 +83,8 @@ class GoalProcessor:
     def reset_count(self) -> None:
         if self.counter is not None:
             self.counter.count = 0
+        if self.ml_detector is not None:
+            self.ml_detector.count = 0
 
     def process(self, frame: np.ndarray, timestamp: str = "") -> MotionEvent | None:
         """Run motion counting on the crop region of the given frame."""
@@ -84,7 +96,23 @@ class GoalProcessor:
         ds = self.config.downsample
         if ds != 1.0:
             crop = cv2.resize(crop, (int((x2 - x1) * ds), int((y2 - y1) * ds)))
-        event = self.counter.process_frame(crop)
+
+        # Always run signal extraction (also does threshold detection)
+        threshold_event = self.counter.process_frame(crop)
+
+        # Use ML detector if available, otherwise fall back to threshold
+        if self.ml_detector is not None:
+            event = self.ml_detector.process_signal(
+                self.counter.signal,
+                self.counter.frame_idx,
+                peak_area=self.counter.signal,
+            )
+            # Sync count from ML detector back to counter for display
+            if event is not None:
+                self.counter.count = self.ml_detector.count
+        else:
+            event = threshold_event
+
         if event is not None:
             self.last_event = event
             self.score_flash = 20
@@ -152,9 +180,11 @@ class GoalProcessor:
 class SourceProcessor:
     """Opens one video source and runs all its goal processors on each frame."""
 
-    def __init__(self, config: SourceConfig):
+    def __init__(self, config: SourceConfig, ml_model_path: str | None = None):
         self.config = config
-        self.goals: list[GoalProcessor] = [GoalProcessor(g) for g in config.goals]
+        self.goals: list[GoalProcessor] = [
+            GoalProcessor(g, ml_model_path=ml_model_path) for g in config.goals
+        ]
         self.cap: cv2.VideoCapture | None = None
         self._frame: np.ndarray | None = None
         self._total_frames = 0

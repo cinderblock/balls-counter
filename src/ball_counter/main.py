@@ -160,6 +160,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Launch setup wizard even if config already exists",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        metavar="PATH",
+        help="Path to trained ML peak detector (.pt) — replaces threshold-based counting",
+    )
     return parser.parse_args()
 
 
@@ -177,7 +183,7 @@ def _web_url(host: str, port: int | None, socket: str | None) -> str:
     return f"http://{host}:{port}"
 
 
-def _start_sources(config_path: Path) -> tuple[list[SourceProcessor], object]:
+def _start_sources(config_path: Path, ml_model_path: str | None = None) -> tuple[list[SourceProcessor], object]:
     configs, pfms = load_configs(config_path)
     sources: list[SourceProcessor] = []
     for config in configs:
@@ -189,12 +195,13 @@ def _start_sources(config_path: Path) -> tuple[list[SourceProcessor], object]:
             print(f"source   - {config.source}: no goals ready, skipping")
             continue
         config.goals[:] = ready_goals
-        proc = SourceProcessor(config)
+        proc = SourceProcessor(config, ml_model_path=ml_model_path)
         if not proc.open():
             print(f"source   - {config.source}: cannot open", file=sys.stderr)
             continue
         goal_names = ", ".join(g.name for g in proc.goals)
-        print(f"source   - {config.source}: connected ({goal_names})")
+        detector = "ML" if ml_model_path else "threshold"
+        print(f"source   - {config.source}: connected ({goal_names}) [{detector}]")
         sources.append(proc)
     return sources, pfms
 
@@ -241,7 +248,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"config   - not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    sources, pfms_cfg = _start_sources(config_path)
+    sources, pfms_cfg = _start_sources(config_path, ml_model_path=args.model)
 
     if not sources:
         print("source   - no sources could be opened", file=sys.stderr)
@@ -325,6 +332,8 @@ def run(args: argparse.Namespace) -> None:
                 for score_name, score_n in state.pop_scores():
                     for goal in proc.goals:
                         if goal.name == score_name:
+                            if goal.ml_detector is not None:
+                                goal.ml_detector.count += score_n
                             goal.counter.count += score_n
                             state.update_count(goal.name, goal.count)
                             state.emit_event(goal.name, score_n, goal.count, ts)

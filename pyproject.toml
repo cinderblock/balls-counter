@@ -19,3 +19,6 @@ web = [
     "fastapi>=0.111",
     "uvicorn>=0.29",
 ]
+ml = [
+    "torch>=2.0",
+]

@@ -10,6 +10,10 @@ __pycache__/
 *.jpg
 *.jpeg
 
+# ML training data and models
+data/
+models/
+
 # IDE
 .vscode/
 .idea/
