@@ -200,7 +200,7 @@ class AppState:
         end_idx = last_idx + int(frames_per_sec * 4)
         clip_frames = buf.slice_by_index(start_idx, end_idx)
         if not clip_frames:
-            print(f"[{goal_name}] capture: no frames in window, skipping")
+            print(f"capture  - {goal_name}: no frames in window, skipping")
             return
         if clips_dir is None:
             clips_dir = _Path("clips")
@@ -215,10 +215,10 @@ class AppState:
             ]
             with open(jsn, "w") as f:
                 _json.dump(data, f, indent=2)
-            print(f"[{goal_name}] capture saved: {mp4.name} ({len(clip_frames)} frames, "
+            print(f"capture  - {goal_name}: saved {mp4.name} ({len(clip_frames)} frames, "
                   f"{len(session['press_frame_idxs'])} press(es))")
         except Exception as e:
-            print(f"[{goal_name}] capture save failed: {e}")
+            print(f"capture  - {goal_name}: save failed: {e}")
 
     def _subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=100)
@@ -1053,7 +1053,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 #anno-section{margin-top:0.6rem;border-top:1px solid #2a2a2a;padding-top:0.6rem}
 .anno-controls{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem}
 #n-balls-input{width:60px;background:#1e1e1e;border:1px solid #444;color:#eee;border-radius:4px;padding:0.3rem 0.5rem;font-size:0.9rem}
-.anno-btn,.trim-btn,.toggle-btn,.speed-btn{padding:0.3rem 0.7rem;font-size:0.82rem;border-radius:4px;cursor:pointer}
+.anno-btn,.trim-btn,.toggle-btn,.speed-btn{padding:0.3rem 0.7rem;font-size:0.82rem;border-radius:4px;cursor:pointer;touch-action:manipulation}
 .anno-btn{background:#2a2a3a;border:1px solid #64a;color:#a8f}
 .anno-btn:hover{background:#3a3a4a}
 .anno-btn.danger{background:#3a1a1a;border-color:#a33;color:#f88}
@@ -1103,6 +1103,25 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 .trim-seg-remove{background:none;border:none;color:#633;cursor:pointer;font-size:0.85rem;padding:0 0.2rem}
 .trim-seg-remove:hover{color:#f44}
 .trim-hint{color:#555;font-size:0.75rem;font-style:italic}
+/* menu button (mobile only) */
+#menu-btn{display:none;background:none;border:none;color:#aaa;font-size:1.3rem;cursor:pointer;padding:0 0.5rem}
+#menu-btn:hover{color:#fff}
+/* mobile */
+@media(max-width:768px){
+  #menu-btn{display:block}
+  #clip-list-panel{display:none;position:fixed;inset:42px 0 0 0;z-index:50;width:100%;border-right:none}
+  #clip-list-panel.open{display:flex}
+  #player-panel{padding:0.5rem}
+  #clip-header{font-size:0.85rem;gap:0.4rem}
+  video{max-height:35vh}
+  #timeline{height:44px}
+  #primary-controls{position:fixed;bottom:0;left:0;right:0;z-index:40;background:#1a1a1a;border-top:1px solid #333;padding:0.5rem;justify-content:center;gap:0.8rem;margin:0}
+  #primary-controls .anno-btn,.save-btn{padding:0.5rem 1.2rem;font-size:1rem;touch-action:manipulation}
+  #secondary-controls{font-size:0.78rem}
+  #footer-bar{display:none}
+  #anno-section{padding-bottom:3.5rem}
+  .reviewer-bar span:first-child{display:none}
+}
 /* modal */
 #modal-overlay{display:none;position:fixed;inset:0;background:#0009;z-index:100;align-items:center;justify-content:center}
 #modal-overlay.show{display:flex}
@@ -1125,12 +1144,13 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 
 <!-- Nav -->
 <div id="nav">
+  <button id="menu-btn" onclick="toggleClipPanel()">&#9776;</button>
   <span class="brand">Ball Counter</span>
-  <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="margin-left:auto;color:#444;font-size:0.78rem;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a>
   <div class="reviewer-bar">
     <span style="color:#666">Reviewer:</span>
     <span id="reviewer-label" style="color:#ccc;font-size:0.82rem"></span>
   </div>
+  <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="margin-left:auto;color:#444;font-size:0.78rem;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a>
 </div>
 
 <!-- Main -->
@@ -1166,7 +1186,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
         <span style="flex:1"></span>
         <a id="download-link" href="#">Download zip</a>
       </div>
-      <video id="video" controls></video>
+      <video id="video" controls playsinline></video>
       <div id="timeline-wrap">
         <canvas id="timeline"></canvas>
       </div>
@@ -1183,13 +1203,15 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
         <div id="trim-segments-list"></div>
       </div>
       <div id="anno-section">
-        <div class="anno-controls">
-          <label class="toggle-btn" id="auto-play-btn"><input type="checkbox" id="auto-play" onchange="localStorage.setItem('pref_autoplay',this.checked);this.parentElement.classList.toggle('on',this.checked)"/>Autoplay</label>
-          <button class="anno-btn" onclick="markScore()">Mark score</button>
-          <button class="anno-btn danger" onclick="undoMark()">Undo</button>
-          <button class="anno-btn danger" onclick="clearAllMarks()">Clear all</button>
+        <div id="primary-controls" class="anno-controls">
           <button class="anno-btn save-btn" onclick="saveAnnotations()">Save</button>
+          <button class="anno-btn danger" onclick="undoMark()">Undo</button>
+          <button class="anno-btn" onclick="markScore()">Mark</button>
+        </div>
+        <div id="secondary-controls" class="anno-controls">
+          <label class="toggle-btn" id="auto-play-btn"><input type="checkbox" id="auto-play" onchange="localStorage.setItem('pref_autoplay',this.checked);this.parentElement.classList.toggle('on',this.checked)"/>Autoplay</label>
           <label class="toggle-btn" id="auto-advance-btn"><input type="checkbox" id="auto-advance" onchange="localStorage.setItem('pref_autoadvance',this.checked);this.parentElement.classList.toggle('on',this.checked)"/>Auto-next</label>
+          <button class="anno-btn danger" onclick="clearAllMarks()">Clear all</button>
           <span style="flex:1"></span>
           <span id="speed-btns">
           <button class="speed-btn" data-rate="0.25" onclick="setSpeed(0.25)">¼×</button>
@@ -1341,6 +1363,7 @@ async function createReviewer() {
 
 function showModal() { document.getElementById('modal-overlay').classList.add('show'); }
 function hideModal() { document.getElementById('modal-overlay').classList.remove('show'); }
+function toggleClipPanel() { document.getElementById('clip-list-panel').classList.toggle('open'); }
 
 // ── clips ──────────────────────────────────────────────────────────────────────
 async function loadClips() {
@@ -1390,6 +1413,7 @@ function renderClipList() {
 
 // ── open clip ─────────────────────────────────────────────────────────────────
 async function openClip(id) {
+  document.getElementById('clip-list-panel').classList.remove('open');
   const r = await fetch('/api/clips/' + id);
   if (!r.ok) return;
   currentClip = await r.json();

@@ -55,7 +55,7 @@ class AutoRecorder:
                     pass
             if self._bytes_written >= self._max_bytes:
                 self._full = True
-                print(f"[auto-record] budget exhausted ({self._bytes_written / 1e6:.0f} MB used)")
+                print(f"samples  - budget exhausted ({self._bytes_written / 1e6:.0f} MB used)")
 
     @property
     def full(self) -> bool:
@@ -116,14 +116,14 @@ class AutoRecorder:
                 total_mb = self._bytes_written / 1e6
                 if self._bytes_written >= self._max_bytes:
                     self._full = True
-                    print(f"[auto-record] saved {mp4.name} ({duration:.1f}s, {size/1e3:.0f} kB) — "
+                    print(f"samples  - saved {mp4.name} ({duration:.1f}s, {size/1e3:.0f} kB) — "
                           f"budget full ({total_mb:.0f} MB), stopping")
                 else:
                     remaining_mb = (self._max_bytes - self._bytes_written) / 1e6
-                    print(f"[auto-record] saved {mp4.name} ({duration:.1f}s, {size/1e3:.0f} kB, "
+                    print(f"samples  - saved {mp4.name} ({duration:.1f}s, {size/1e3:.0f} kB, "
                           f"{remaining_mb:.0f} MB remaining)")
         except Exception as e:
-            print(f"[auto-record] save failed for {goal_name}: {e}")
+            print(f"samples  - save failed for {goal_name}: {e}")
 
 _DEFAULT_WIZARD_PORT = 8080
 
@@ -184,17 +184,17 @@ def _start_sources(config_path: Path) -> tuple[list[SourceProcessor], object]:
         ready_goals = [g for g in config.goals if g.line or g.roi_points]
         skipped = len(config.goals) - len(ready_goals)
         if skipped:
-            print(f"[{config.source}] WARNING: {skipped} goal(s) have no line or ROI, skipping them")
+            print(f"source   - {config.source}: {skipped} goal(s) have no line or ROI, skipping")
         if not ready_goals:
-            print(f"[{config.source}] WARNING: no goals ready, skipping source")
+            print(f"source   - {config.source}: no goals ready, skipping")
             continue
         config.goals[:] = ready_goals
         proc = SourceProcessor(config)
         if not proc.open():
-            print(f"ERROR: cannot open source: {config.source}", file=sys.stderr)
+            print(f"source   - {config.source}: cannot open", file=sys.stderr)
             continue
         goal_names = ", ".join(g.name for g in proc.goals)
-        print(f"[{config.source}] connected — goals: {goal_names}")
+        print(f"source   - {config.source}: connected ({goal_names})")
         sources.append(proc)
     return sources, pfms
 
@@ -231,20 +231,20 @@ def run(args: argparse.Namespace) -> None:
                             socket_path=web_socket, trusted_proxies=trusted)
         url = _web_url(args.host, web_port, web_socket)
         if config_missing:
-            print(f"Config not found. Open {url}/wizard to set up.")
+            print(f"wizard   - config not found, open {url}/wizard to set up")
             wizard_done.wait()  # block until wizard saves the config
-            print("Wizard saved config — starting processors...")
+            print("wizard   - config saved, starting processors")
         else:
-            print(f"Wizard active. Open {url}/wizard (counting continues with existing config).")
+            print(f"wizard   - active at {url}/wizard (counting continues with existing config)")
 
     if not config_path.exists():
-        print(f"ERROR: config file not found: {config_path}", file=sys.stderr)
+        print(f"config   - not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
     sources, pfms_cfg = _start_sources(config_path)
 
     if not sources:
-        print("ERROR: no sources could be opened", file=sys.stderr)
+        print("source   - no sources could be opened", file=sys.stderr)
         sys.exit(1)
 
     state = web_state
@@ -253,13 +253,13 @@ def run(args: argparse.Namespace) -> None:
         state = AppState()
         start_server_thread(state, port=web_port, host=args.host,
                             socket_path=web_socket, trusted_proxies=trusted)
-        print(f"Web API listening on {_web_url(args.host, web_port, web_socket)}")
+        print(f"web      - listening on {_web_url(args.host, web_port, web_socket)}")
 
     forwarder = None
     if pfms_cfg is not None:
         from ball_counter.pfms import PfmsForwarder
         forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source)
-        print(f"PFMS integration enabled → {pfms_cfg.url}")
+        print(f"pfms     - enabled → {pfms_cfg.url}")
 
     if state is not None:
         state.set_clips_dir(config_path.parent / "clips")
@@ -268,19 +268,22 @@ def run(args: argparse.Namespace) -> None:
                 state.update_count(goal.name, 0)
                 state.register_buffer(goal.name, goal.buffer)
 
-    # Auto-record short clips around detected events (live sources only)
     clips_dir = config_path.parent / "clips"
+
+    # Auto-record short clips around detected events (live sources only)
     recorder = None
     if all(not s.is_video_file for s in sources):
         import shutil
         free_bytes = shutil.disk_usage(clips_dir if clips_dir.exists() else clips_dir.parent).free
         free_gb = free_bytes / 1e9
+        clips_size = sum(f.stat().st_size for f in clips_dir.rglob("*") if f.is_file()) if clips_dir.exists() else 0
+        n_clips = sum(1 for f in clips_dir.glob("*.mp4")) if clips_dir.exists() else 0
         if free_gb < 10:
-            print(f"[auto-record] DISABLED — only {free_gb:.1f} GB free disk space (need 10 GB)")
+            print(f"samples  - DISABLED — only {free_gb:.1f} GB free ({clips_size / 1e6:.0f} MB in {n_clips} clips)")
         else:
             recorder = AutoRecorder(clips_dir)
             if not recorder.full:
-                print(f"[auto-record] enabled → {clips_dir} (1 GB budget, {free_gb:.0f} GB free)")
+                print(f"samples  - enabled → {clips_dir} ({clips_size / 1e6:.0f} MB in {n_clips} clips, 1 GB budget, {free_gb:.0f} GB free)")
 
 
     progress_last: dict[str, int] = {}
@@ -306,7 +309,7 @@ def run(args: argparse.Namespace) -> None:
                 last = progress_last.get(proc.source, 0)
                 if frame_idx == 1 or frame_idx - last >= args.progress_interval or frame_idx >= proc.total_frames:
                     pct = frame_idx / proc.total_frames * 100
-                    print(f"[{proc.source}] progress: {frame_idx}/{proc.total_frames} ({pct:.1f}%)")
+                    print(f"progress - {proc.source}: {frame_idx}/{proc.total_frames} ({pct:.1f}%)")
                     progress_last[proc.source] = frame_idx
 
             if state is not None:
@@ -317,7 +320,7 @@ def run(args: argparse.Namespace) -> None:
                             goal.buffer.clear()
                             state.update_count(goal.name, 0)
                             state.emit_reset(goal.name)
-                            print(f"[{goal.name}] count reset to 0")
+                            print(f"score    - {goal.name}: reset to 0")
 
                 for score_name, score_n in state.pop_scores():
                     for goal in proc.goals:
@@ -325,7 +328,7 @@ def run(args: argparse.Namespace) -> None:
                             goal.counter.count += score_n
                             state.update_count(goal.name, goal.count)
                             state.emit_event(goal.name, score_n, goal.count, ts)
-                            print(f"[{goal.name}] manual +{score_n} (total: {goal.count})")
+                            print(f"score    - {goal.name}: manual +{score_n} (total: {goal.count})")
                             if forwarder and goal.config.pfms_element:
                                 alliance = ("red" if "red" in goal.name
                                             else "blue" if "blue" in goal.name
@@ -341,7 +344,7 @@ def run(args: argparse.Namespace) -> None:
                         state.update_frame(goal.name, jpeg)
 
                 if event:
-                    print(f"[{goal.name}] score at {ts}: +{event.n_balls} (total: {goal.count})")
+                    print(f"score    - {goal.name}: +{event.n_balls} at {ts} (total: {goal.count})")
                     if state is not None:
                         state.emit_event(goal.name, event.n_balls, goal.count, ts)
                     if forwarder and goal.config.pfms_element:
@@ -351,7 +354,7 @@ def run(args: argparse.Namespace) -> None:
                         if alliance:
                             forwarder.send(alliance, goal.config.pfms_element, event.n_balls)
                         else:
-                            print(f"[{goal.name}] WARNING: cannot determine alliance for PFMS")
+                            print(f"pfms     - {goal.name}: cannot determine alliance")
 
                 # Auto-record on signal activity above 10% of ball_area —
                 # more sensitive than scoring but filters out sensor noise
@@ -364,14 +367,13 @@ def run(args: argparse.Namespace) -> None:
         if frames_read == 0 and (all_live or file_sources_done >= file_sources):
             break
 
-    print("\n--- final counts ---")
     total = 0
     for proc in sources:
         for goal in proc.goals:
-            print(f"  {goal.name}: {goal.count}")
+            print(f"final    - {goal.name}: {goal.count}")
             total += goal.count
         proc.release()
-    print(f"  combined: {total}")
+    print(f"final    - combined: {total}")
 
 
 def main():
