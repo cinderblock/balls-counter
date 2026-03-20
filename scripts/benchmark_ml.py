@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Benchmark the ML peak detector against human annotations and the threshold baseline.
+"""Benchmark detection methods against human annotations.
 
-Runs both the threshold-based and ML-based peak detectors on annotated clips
-and compares their performance side by side.
+Stores per-clip results so new annotated clips can be incrementally
+processed without re-running everything. Each method's results are
+keyed by clip name — only missing clips are evaluated.
 
 Usage:
+    # Run all methods on any new/changed clips:
     uv run python scripts/benchmark_ml.py configs/clips --config configs/live.json --model models/peak_detector.pt
+
+    # Force re-run everything:
+    uv run python scripts/benchmark_ml.py configs/clips --config configs/live.json --model models/peak_detector.pt --force
+
+    # Show comparison table from saved results:
+    uv run python scripts/compare_results.py
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -25,7 +34,7 @@ from ball_counter.counter import MotionCounter
 from ball_counter.ml_detector import MLPeakDetector
 
 
-# ── Signal extraction (shared) ───────────────────────────────────────────────
+# ── Signal extraction ─────────────────────────────────────────────────────────
 
 def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0
                              ) -> tuple[np.ndarray, float]:
@@ -64,7 +73,7 @@ def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0
         band_width=goal_config.band_width,
         min_peak=goal_config.min_peak,
         fall_ratio=goal_config.fall_ratio,
-        cooldown=0,  # Raw signal, no cooldown
+        cooldown=0,
         hsv_low=goal_config.hsv_low,
         hsv_high=goal_config.hsv_high,
     )
@@ -88,11 +97,11 @@ def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0
     return np.array(signals, dtype=np.float32), actual_fps
 
 
-# ── Threshold-based peak detection (existing method) ─────────────────────────
+# ── Detection methods ─────────────────────────────────────────────────────────
 
 def detect_threshold(signal: np.ndarray, fps: float, goal_config,
                      **overrides) -> list[float]:
-    """Apply the threshold peak detector to a signal trace."""
+    """Threshold peak detector on signal trace."""
     ball_area = overrides.get("ball_area", goal_config.ball_area)
     fall_ratio = overrides.get("fall_ratio", goal_config.fall_ratio)
     cooldown = overrides.get("cooldown", goal_config.cooldown)
@@ -127,17 +136,15 @@ def detect_threshold(signal: np.ndarray, fps: float, goal_config,
     return events
 
 
-# ── ML-based peak detection (frame-by-frame, same as live) ───────────────────
-
 def detect_ml(signal: np.ndarray, fps: float, ml_detector: MLPeakDetector
               ) -> list[float]:
-    """Run the ML peak detector frame-by-frame, simulating the live path."""
+    """ML peak detector, frame-by-frame (same as live path)."""
     events: list[float] = []
     for i, val in enumerate(signal):
         ev = ml_detector.process_signal(int(val), i)
         if ev is not None:
             events.append(ev.frame / fps)
-    # Drain any remaining pending events
+    # Drain pending events
     for i in range(100):
         ev = ml_detector.process_signal(0, len(signal) + i)
         if ev is not None:
@@ -145,7 +152,7 @@ def detect_ml(signal: np.ndarray, fps: float, ml_detector: MLPeakDetector
     return events
 
 
-# ── Matching (same as benchmark.py) ──────────────────────────────────────────
+# ── Matching ──────────────────────────────────────────────────────────────────
 
 def get_all_marks(clip: dict, dedup_window: float = 0.15) -> list[float]:
     times = []
@@ -176,21 +183,71 @@ def match_events(auto: list[float], human: list[float],
     return tp, len(auto) - tp, len(human) - tp
 
 
+def clip_fingerprint(clip: dict) -> str:
+    """Hash of clip annotations so we can detect re-annotated clips."""
+    raw = json.dumps(clip.get("annotations", {}), sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+# ── Results storage ───────────────────────────────────────────────────────────
+
+def load_results(path: Path) -> dict:
+    """Load results file. Structure:
+
+    {
+        "methods": {
+            "threshold": {
+                "params": {...},
+                "clips": {
+                    "clip_name": {"tp": N, "fp": N, "fn": N, "human": N, "fingerprint": "abc123"},
+                    ...
+                }
+            },
+            ...
+        }
+    }
+    """
+    if path.exists():
+        return json.loads(path.read_text())
+    return {"methods": {}}
+
+
+def save_results(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def get_stale_clips(method_data: dict, all_clips: dict[str, str]) -> list[str]:
+    """Return clip names that need (re-)evaluation.
+
+    A clip needs evaluation if:
+    - It's not in the saved results
+    - Its annotation fingerprint has changed
+    """
+    saved = method_data.get("clips", {})
+    stale = []
+    for clip_name, fingerprint in all_clips.items():
+        existing = saved.get(clip_name)
+        if existing is None or existing.get("fingerprint") != fingerprint:
+            stale.append(clip_name)
+    return stale
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="Benchmark ML vs threshold peak detection")
+    ap = argparse.ArgumentParser(description="Benchmark detection methods (incremental)")
     ap.add_argument("clips_dir", help="Directory with clip MP4s + JSON sidecars")
     ap.add_argument("--config", required=True, help="Config JSON for goal geometry")
-    ap.add_argument("--model", required=True, help="Path to trained .pt model")
+    ap.add_argument("--model", default=None, help="Path to trained .pt model (enables ML method)")
     ap.add_argument("--goal", default=None, help="Filter to a single goal name")
     ap.add_argument("--tolerance", type=float, default=1.0, help="Match tolerance (seconds)")
-    ap.add_argument("--threshold", type=float, default=0.5, help="ML detection threshold")
-    ap.add_argument("--min-distance", type=int, default=3, help="Min frames between events")
+    ap.add_argument("--threshold", type=float, default=0.6, help="ML detection threshold")
+    ap.add_argument("--min-distance", type=int, default=3, help="Min frames between ML events")
     ap.add_argument("-v", "--verbose", action="store_true")
-    ap.add_argument("--results", default=None,
-                    help="Path to results JSON (default: data/benchmark_results.json)")
-    # Threshold detector overrides
+    ap.add_argument("--results", default="data/benchmark_results.json",
+                    help="Path to results JSON")
+    ap.add_argument("--force", action="store_true", help="Re-run all clips, ignoring cache")
     ap.add_argument("--fall-ratio", type=float, default=None)
     ap.add_argument("--cooldown", type=int, default=None)
     args = ap.parse_args()
@@ -202,21 +259,14 @@ def main():
         for g in src.goals:
             goal_configs[g.name] = g
 
-    # Validate model path
-    model_path = args.model
-    if not Path(model_path).exists():
-        print(f"Model not found: {model_path}", file=sys.stderr)
-        sys.exit(1)
-    print(f"Model: {model_path}")
-
     threshold_overrides = {}
     if args.fall_ratio is not None:
         threshold_overrides["fall_ratio"] = args.fall_ratio
     if args.cooldown is not None:
         threshold_overrides["cooldown"] = args.cooldown
 
-    # Collect clips
-    clips = []
+    # Discover all annotated clips
+    all_clips: dict[str, dict] = {}  # clip_name -> {jp, mp4, clip, gc, marks, fingerprint}
     for jp in sorted(clips_dir.glob("*.json")):
         if jp.stem == "reviewers":
             continue
@@ -235,116 +285,199 @@ def main():
         marks = get_all_marks(clip)
         if not marks:
             continue
-        clips.append((jp, mp4, clip, gc, marks))
+        all_clips[jp.stem] = {
+            "jp": jp, "mp4": mp4, "clip": clip, "gc": gc,
+            "marks": marks, "fingerprint": clip_fingerprint(clip),
+        }
 
-    if not clips:
+    if not all_clips:
         print("No annotated clips found.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Evaluating {len(clips)} clips  (tolerance={args.tolerance}s, "
-          f"ml_threshold={args.threshold}, min_distance={args.min_distance})\n")
+    # Load existing results
+    results_path = Path(args.results)
+    results_data = load_results(results_path)
+    if args.force:
+        results_data = {"methods": {}}
 
-    # Accumulators
-    thresh_tp = thresh_fp = thresh_fn = 0
-    ml_tp = ml_fp = ml_fn = 0
-
-    for jp, mp4, clip, gc, human in clips:
-        signal, fps = extract_signal_from_clip(mp4, gc, clip.get("fps", 30.0))
-        if len(signal) == 0:
-            continue
-
-        # Threshold detector
-        auto_thresh = detect_threshold(signal, fps, gc, **threshold_overrides)
-        t_tp, t_fp, t_fn = match_events(auto_thresh, human, args.tolerance)
-        thresh_tp += t_tp
-        thresh_fp += t_fp
-        thresh_fn += t_fn
-
-        # ML detector (fresh instance per clip, same as live stream)
-        ml_det = MLPeakDetector(
-            model_path,
-            threshold=args.threshold,
-            min_distance=args.min_distance,
-            ball_area=gc.ball_area,
-        )
-        auto_ml = detect_ml(signal, fps, ml_det)
-        m_tp, m_fp, m_fn = match_events(auto_ml, human, args.tolerance)
-        ml_tp += m_tp
-        ml_fp += m_fp
-        ml_fn += m_fn
-
-        if args.verbose:
-            def fmt(tp, fp, fn):
-                p = tp / max(1, tp + fp)
-                r = tp / max(1, tp + fn)
-                f1 = 2 * p * r / max(1e-8, p + r)
-                return f"TP={tp} FP={fp} FN={fn}  P={p:.2f} R={r:.2f} F1={f1:.2f}"
-
-            print(f"  {jp.stem}")
-            print(f"    human={len(human)}")
-            print(f"    thresh: auto={len(auto_thresh):>3}  {fmt(t_tp, t_fp, t_fn)}")
-            print(f"    ml:     auto={len(auto_ml):>3}  {fmt(m_tp, m_fp, m_fn)}")
-            if auto_ml:
-                print(f"    ml_times:  {[f'{t:.2f}' for t in auto_ml]}")
-            print(f"    human:     {[f'{t:.2f}' for t in human]}")
-            print()
-
-    human_total = thresh_tp + thresh_fn  # same for both
-
-    def make_result(name, tp, fp, fn):
-        p = tp / max(1, tp + fp)
-        r = tp / max(1, tp + fn)
-        f1 = 2 * p * r / max(1e-8, p + r)
-        return {
-            "method": name,
-            "tp": tp, "fp": fp, "fn": fn,
-            "precision": round(p, 4),
-            "recall": round(r, 4),
-            "f1": round(f1, 4),
-            "human_marks": tp + fn,
-            "n_clips": len(clips),
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-        }
-
-    results = [
-        make_result("threshold", thresh_tp, thresh_fp, thresh_fn),
-        make_result("ml-1dcnn", ml_tp, ml_fp, ml_fn),
-    ]
-
-    # Print summary
-    for r in results:
-        print(f"\n{'=' * 52}")
-        print(f"  {r['method']}")
-        print(f"  TP={r['tp']}  FP={r['fp']}  FN={r['fn']}")
-        print(f"  Precision={r['precision']:.3f}  Recall={r['recall']:.3f}  F1={r['f1']:.3f}")
-
-    # Save results
-    results_path = Path(args.results) if args.results else None
-    if results_path is None:
-        results_path = Path("data/benchmark_results.json")
-
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = []
-    if results_path.exists():
-        existing = json.loads(results_path.read_text())
-
-    # Add params to each result for reproducibility
-    for r in results:
-        if r["method"] == "threshold":
-            r["params"] = {
+    # Define methods to benchmark
+    methods = {
+        "threshold": {
+            "params": {
                 "fall_ratio": threshold_overrides.get("fall_ratio", "config"),
                 "cooldown": threshold_overrides.get("cooldown", "config"),
-            }
-        else:
-            r["params"] = {
+            },
+        },
+    }
+    if args.model:
+        model_path = Path(args.model)
+        if not model_path.exists():
+            print(f"Model not found: {model_path}", file=sys.stderr)
+            sys.exit(1)
+        methods["ml-1dcnn"] = {
+            "params": {
                 "model": str(model_path),
                 "threshold": args.threshold,
                 "min_distance": args.min_distance,
+            },
+        }
+
+    # Fingerprints for all current clips
+    clip_fingerprints = {name: info["fingerprint"] for name, info in all_clips.items()}
+
+    # Check what needs updating across all methods
+    any_work = False
+    for method_name, method_info in methods.items():
+        if method_name not in results_data["methods"]:
+            results_data["methods"][method_name] = {"params": method_info["params"], "clips": {}}
+        stale = get_stale_clips(results_data["methods"][method_name], clip_fingerprints)
+        if stale:
+            any_work = True
+            break
+
+    if not any_work and not args.force:
+        print(f"No new clips. {len(all_clips)} annotated clips, all up to date.\n")
+    else:
+        total_new = set()
+        for method_name in methods:
+            stale = get_stale_clips(results_data["methods"].get(method_name, {}), clip_fingerprints)
+            total_new.update(stale)
+        new_marks = sum(len(all_clips[c]["marks"]) for c in total_new if c in all_clips)
+        print(f"Updating with {len(total_new)} new/changed clips ({new_marks} marks). "
+              f"{len(all_clips)} total annotated clips.\n")
+
+    # Process each method
+    for method_name, method_info in methods.items():
+        if method_name not in results_data["methods"]:
+            results_data["methods"][method_name] = {"params": method_info["params"], "clips": {}}
+        method_data = results_data["methods"][method_name]
+        method_data["params"] = method_info["params"]
+
+        # Remove clips no longer in the dataset
+        saved_clips = set(method_data.get("clips", {}).keys())
+        current_clips = set(clip_fingerprints.keys())
+        removed = saved_clips - current_clips
+        for r in removed:
+            del method_data["clips"][r]
+
+        stale = get_stale_clips(method_data, clip_fingerprints)
+
+        if not stale:
+            continue
+
+        print(f"  {method_name}: evaluating {len(stale)} clips "
+              f"({len(current_clips) - len(stale)} cached)")
+
+        for clip_name in stale:
+            info = all_clips[clip_name]
+            signal, fps = extract_signal_from_clip(
+                info["mp4"], info["gc"], info["clip"].get("fps", 30.0))
+            if len(signal) == 0:
+                continue
+
+            if method_name == "threshold":
+                auto = detect_threshold(signal, fps, info["gc"], **threshold_overrides)
+            elif method_name == "ml-1dcnn":
+                ml_det = MLPeakDetector(
+                    str(model_path),
+                    threshold=args.threshold,
+                    min_distance=args.min_distance,
+                    ball_area=info["gc"].ball_area,
+                )
+                auto = detect_ml(signal, fps, ml_det)
+            else:
+                continue
+
+            tp, fp, fn = match_events(auto, info["marks"], args.tolerance)
+            method_data["clips"][clip_name] = {
+                "tp": tp, "fp": fp, "fn": fn,
+                "human": len(info["marks"]),
+                "fingerprint": info["fingerprint"],
             }
 
-    existing.extend(results)
-    results_path.write_text(json.dumps(existing, indent=2) + "\n")
-    print(f"\nResults saved to {results_path} ({len(existing)} total entries)")
+            if args.verbose:
+                p = tp / max(1, tp + fp)
+                r = tp / max(1, tp + fn)
+                f1 = 2 * p * r / max(1e-8, p + r)
+                print(f"  {clip_name}: human={len(info['marks'])} auto={tp+fp} "
+                      f"TP={tp} FP={fp} FN={fn} F1={f1:.2f}")
+
+    # Save
+    results_data["updated"] = datetime.now().isoformat(timespec="seconds")
+    save_results(results_path, results_data)
+
+    # Print summary
+    print(f"\nResults saved to {results_path}")
+    print()
+
+    # Inline comparison
+    _print_comparison(results_data)
+
+
+def _print_comparison(results_data: dict) -> None:
+    """Print comparison table from results data."""
+    methods = results_data.get("methods", {})
+    if not methods:
+        return
+
+    rows = []
+    for method_name, method_data in methods.items():
+        clips = method_data.get("clips", {})
+        tp = sum(c["tp"] for c in clips.values())
+        fp = sum(c["fp"] for c in clips.values())
+        fn = sum(c["fn"] for c in clips.values())
+        human = sum(c["human"] for c in clips.values())
+        p = tp / max(1, tp + fp)
+        r = tp / max(1, tp + fn)
+        f1 = 2 * p * r / max(1e-8, p + r)
+        rows.append({
+            "method": method_name, "tp": tp, "fp": fp, "fn": fn,
+            "human": human, "n_clips": len(clips),
+            "precision": p, "recall": r, "f1": f1,
+            "params": method_data.get("params", {}),
+        })
+
+    if not rows:
+        return
+
+    human = rows[0]["human"]
+    n_clips = rows[0]["n_clips"]
+    print(f"Ground truth: {human} marks across {n_clips} clips\n")
+
+    name_w = max(len(r["method"]) for r in rows)
+    name_w = max(name_w, 6)
+
+    header = (f"{'Method':<{name_w}}  "
+              f"{'TP':>12}  {'FP':>10}  {'FN':>10}  "
+              f"{'Prec':>14}  {'Recall':>14}  {'F1':>14}")
+    print(header)
+    print("-" * len(header))
+
+    for r in rows:
+        def fmt_int(val, delta):
+            s = f"{val}"
+            if delta != 0:
+                s += f" ({delta:+d})"
+            return s
+
+        def fmt_float(val, delta):
+            s = f"{val:.3f}"
+            if abs(delta) > 0.0005:
+                s += f" ({delta:+.3f})"
+            return s
+
+        print(f"{r['method']:<{name_w}}  "
+              f"{fmt_int(r['tp'], r['tp'] - r['human']):>12}  "
+              f"{fmt_int(r['fp'], r['fp']):>10}  "
+              f"{fmt_int(r['fn'], r['fn']):>10}  "
+              f"{fmt_float(r['precision'], r['precision'] - 1.0):>14}  "
+              f"{fmt_float(r['recall'], r['recall'] - 1.0):>14}  "
+              f"{fmt_float(r['f1'], r['f1'] - 1.0):>14}")
+
+    print()
+    for r in rows:
+        ps = ", ".join(f"{k}={v}" for k, v in r["params"].items())
+        print(f"  {r['method']}: {ps}")
 
 
 if __name__ == "__main__":

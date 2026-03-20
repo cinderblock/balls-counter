@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Compare benchmark results across detection methods.
 
-Reads saved results from benchmark_ml.py and prints a comparison table.
-Shows the latest run for each method by default, or all runs with --all.
+Reads per-clip results saved by benchmark_ml.py and prints a comparison table.
 
 Usage:
     uv run python scripts/compare_results.py
-    uv run python scripts/compare_results.py --all
     uv run python scripts/compare_results.py data/benchmark_results.json
 """
 
@@ -16,35 +14,50 @@ import sys
 from pathlib import Path
 
 
-def print_table(results: list[dict]) -> None:
-    if not results:
+def print_table(results_data: dict) -> None:
+    methods = results_data.get("methods", {})
+    if not methods:
         print("No results found.")
         return
 
-    human = results[0]["human_marks"]
-    print(f"Ground truth: {human} marks across {results[0]['n_clips']} clips\n")
+    rows = []
+    for method_name, method_data in methods.items():
+        clips = method_data.get("clips", {})
+        tp = sum(c["tp"] for c in clips.values())
+        fp = sum(c["fp"] for c in clips.values())
+        fn = sum(c["fn"] for c in clips.values())
+        human = sum(c["human"] for c in clips.values())
+        p = tp / max(1, tp + fp)
+        r = tp / max(1, tp + fn)
+        f1 = 2 * p * r / max(1e-8, p + r)
+        rows.append({
+            "method": method_name, "tp": tp, "fp": fp, "fn": fn,
+            "human": human, "n_clips": len(clips),
+            "precision": p, "recall": r, "f1": f1,
+            "params": method_data.get("params", {}),
+        })
 
-    # Column widths
-    name_w = max(len(r["method"]) for r in results)
-    name_w = max(name_w, 6)  # "Method"
+    if not rows:
+        return
 
-    # Header
+    human = rows[0]["human"]
+    n_clips = rows[0]["n_clips"]
+    print(f"Ground truth: {human} marks across {n_clips} clips")
+    updated = results_data.get("updated", "")
+    if updated:
+        print(f"Last updated: {updated}")
+    print()
+
+    name_w = max(len(r["method"]) for r in rows)
+    name_w = max(name_w, 6)
+
     header = (f"{'Method':<{name_w}}  "
               f"{'TP':>12}  {'FP':>10}  {'FN':>10}  "
-              f"{'Prec':>14}  {'Recall':>14}  {'F1':>14}  "
-              f"{'Date':>10}")
+              f"{'Prec':>14}  {'Recall':>14}  {'F1':>14}")
     print(header)
     print("-" * len(header))
 
-    for r in results:
-        gt = r["human_marks"]
-        tp_d = r["tp"] - gt
-        fp_d = r["fp"]
-        fn_d = r["fn"]
-        p_d = r["precision"] - 1.0
-        r_d = r["recall"] - 1.0
-        f1_d = r["f1"] - 1.0
-
+    for r in rows:
         def fmt_int(val, delta):
             s = f"{val}"
             if delta != 0:
@@ -57,31 +70,24 @@ def print_table(results: list[dict]) -> None:
                 s += f" ({delta:+.3f})"
             return s
 
-        date = r.get("timestamp", "")[:10]
-
         print(f"{r['method']:<{name_w}}  "
-              f"{fmt_int(r['tp'], tp_d):>12}  "
-              f"{fmt_int(r['fp'], fp_d):>10}  "
-              f"{fmt_int(r['fn'], fn_d):>10}  "
-              f"{fmt_float(r['precision'], p_d):>14}  "
-              f"{fmt_float(r['recall'], r_d):>14}  "
-              f"{fmt_float(r['f1'], f1_d):>14}  "
-              f"{date:>10}")
+              f"{fmt_int(r['tp'], r['tp'] - r['human']):>12}  "
+              f"{fmt_int(r['fp'], r['fp']):>10}  "
+              f"{fmt_int(r['fn'], r['fn']):>10}  "
+              f"{fmt_float(r['precision'], r['precision'] - 1.0):>14}  "
+              f"{fmt_float(r['recall'], r['recall'] - 1.0):>14}  "
+              f"{fmt_float(r['f1'], r['f1'] - 1.0):>14}")
 
-    # Params detail
     print()
-    for r in results:
-        params = r.get("params", {})
-        if params:
-            ps = ", ".join(f"{k}={v}" for k, v in params.items())
-            print(f"  {r['method']}: {ps}")
+    for r in rows:
+        ps = ", ".join(f"{k}={v}" for k, v in r["params"].items())
+        print(f"  {r['method']}: {ps}")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Compare benchmark results")
     ap.add_argument("results", nargs="?", default="data/benchmark_results.json",
                     help="Path to results JSON")
-    ap.add_argument("--all", action="store_true", help="Show all runs, not just latest per method")
     args = ap.parse_args()
 
     path = Path(args.results)
@@ -89,16 +95,14 @@ def main():
         print(f"No results file at {path}. Run benchmark_ml.py first.", file=sys.stderr)
         sys.exit(1)
 
-    all_results = json.loads(path.read_text())
+    data = json.loads(path.read_text())
 
-    if args.all:
-        print_table(all_results)
-    else:
-        # Latest per method
-        latest: dict[str, dict] = {}
-        for r in all_results:
-            latest[r["method"]] = r
-        print_table(list(latest.values()))
+    # Handle old format (list of dicts) gracefully
+    if isinstance(data, list):
+        print("Results file is in old format. Re-run benchmark_ml.py to regenerate.", file=sys.stderr)
+        sys.exit(1)
+
+    print_table(data)
 
 
 if __name__ == "__main__":
