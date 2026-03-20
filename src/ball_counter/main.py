@@ -110,16 +110,17 @@ class AutoRecorder:
             data["auto_recorded"] = True
             jsn_path.write_text(_json.dumps(data, indent=2))
             size = mp4.stat().st_size
+            duration = len(frames) / self._fps
             with self._lock:
                 self._bytes_written += size
                 total_mb = self._bytes_written / 1e6
                 if self._bytes_written >= self._max_bytes:
                     self._full = True
-                    print(f"[auto-record] saved {mp4.name} ({size/1e3:.0f} kB) — "
+                    print(f"[auto-record] saved {mp4.name} ({duration:.1f}s, {size/1e3:.0f} kB) — "
                           f"budget full ({total_mb:.0f} MB), stopping")
                 else:
                     remaining_mb = (self._max_bytes - self._bytes_written) / 1e6
-                    print(f"[auto-record] saved {mp4.name} ({size/1e3:.0f} kB, "
+                    print(f"[auto-record] saved {mp4.name} ({duration:.1f}s, {size/1e3:.0f} kB, "
                           f"{remaining_mb:.0f} MB remaining)")
         except Exception as e:
             print(f"[auto-record] save failed for {goal_name}: {e}")
@@ -269,9 +270,18 @@ def run(args: argparse.Namespace) -> None:
 
     # Auto-record short clips around detected events (live sources only)
     clips_dir = config_path.parent / "clips"
-    recorder = AutoRecorder(clips_dir) if all(not s.is_video_file for s in sources) else None
-    if recorder and not recorder.full:
-        print(f"[auto-record] enabled → {clips_dir} (1 GB budget)")
+    recorder = None
+    if all(not s.is_video_file for s in sources):
+        import shutil
+        free_bytes = shutil.disk_usage(clips_dir if clips_dir.exists() else clips_dir.parent).free
+        free_gb = free_bytes / 1e9
+        if free_gb < 10:
+            print(f"[auto-record] DISABLED — only {free_gb:.1f} GB free disk space (need 10 GB)")
+        else:
+            recorder = AutoRecorder(clips_dir)
+            if not recorder.full:
+                print(f"[auto-record] enabled → {clips_dir} (1 GB budget, {free_gb:.0f} GB free)")
+
 
     progress_last: dict[str, int] = {}
     all_live = all(not s.is_video_file for s in sources)
