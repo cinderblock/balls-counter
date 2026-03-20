@@ -8,6 +8,122 @@ from pathlib import Path
 from ball_counter.config import load_configs
 from ball_counter.stream import SourceProcessor
 
+
+class AutoRecorder:
+    """Automatically saves short clips around detected scoring events.
+
+    When an event fires, waits ``tail_sec`` for the signal to settle, then
+    slices ``pad_sec`` of quiet on each side of the event from the rolling
+    buffer and saves to the clips directory.  Stops recording once
+    ``max_bytes`` of MP4 data has been written.
+    """
+
+    def __init__(
+        self,
+        clips_dir: Path,
+        fps: float = 30.0,
+        pad_sec: float = 2.0,
+        tail_sec: float = 2.0,
+        max_bytes: int = 1_000_000_000,  # 1 GB
+    ):
+        self._clips_dir = clips_dir
+        self._fps = fps
+        self._pad_sec = pad_sec
+        self._tail_sec = tail_sec
+        self._max_bytes = max_bytes
+        self._bytes_written = 0
+        self._full = False
+        self._lock = threading.Lock()
+        # Pending sessions: goal_name -> {event_frames, timer, buffer}
+        self._pending: dict[str, dict] = {}
+
+        # Sum existing auto-recorded clips so restarts respect the budget
+        # Sum existing auto-recorded clips so restarts respect the budget.
+        # Auto clips are tagged with "auto_recorded" in their JSON sidecar.
+        if clips_dir.exists():
+            for jsn in clips_dir.glob("*.json"):
+                if jsn.stem == "reviewers":
+                    continue
+                try:
+                    import json as _json
+                    data = _json.loads(jsn.read_text())
+                    if data.get("auto_recorded"):
+                        mp4 = clips_dir / (jsn.stem + ".mp4")
+                        if mp4.exists():
+                            self._bytes_written += mp4.stat().st_size
+                except Exception:
+                    pass
+            if self._bytes_written >= self._max_bytes:
+                self._full = True
+                print(f"[auto-record] budget exhausted ({self._bytes_written / 1e6:.0f} MB used)")
+
+    @property
+    def full(self) -> bool:
+        return self._full
+
+    def on_activity(self, goal_name: str, frame_idx: int, buffer) -> None:
+        """Record any signal activity. Coalesces nearby frames into one clip."""
+        if self._full:
+            return
+        with self._lock:
+            session = self._pending.get(goal_name)
+            if session is not None:
+                # More activity within the tail window — coalesce
+                session["event_frames"].append(frame_idx)
+                session["timer"].cancel()
+            else:
+                session = {"event_frames": [frame_idx], "buffer": buffer}
+                self._pending[goal_name] = session
+            t = threading.Timer(
+                self._tail_sec,
+                self._save,
+                args=(goal_name,),
+            )
+            t.daemon = True
+            t.start()
+            session["timer"] = t
+
+    def _save(self, goal_name: str) -> None:
+        if self._full:
+            return
+        with self._lock:
+            session = self._pending.pop(goal_name, None)
+        if session is None:
+            return
+        event_frames = session["event_frames"]
+        buffer = session["buffer"]
+        pad_frames = int(self._pad_sec * self._fps)
+        start = min(event_frames) - pad_frames
+        end = max(event_frames) + pad_frames
+        frames = buffer.slice_by_index(start, end)
+        if not frames:
+            return
+
+        self._clips_dir.mkdir(parents=True, exist_ok=True)
+
+        import json as _json
+        from ball_counter.clips import save_clip
+        try:
+            mp4, jsn_path = save_clip(frames, goal_name, self._clips_dir, fps=self._fps)
+            # Tag the sidecar so we can identify auto-recorded clips
+            data = _json.loads(jsn_path.read_text())
+            data["auto_recorded"] = True
+            jsn_path.write_text(_json.dumps(data, indent=2))
+            size = mp4.stat().st_size
+            with self._lock:
+                self._bytes_written += size
+                total_mb = self._bytes_written / 1e6
+                if self._bytes_written >= self._max_bytes:
+                    self._full = True
+                    print(f"[auto-record] saved {mp4.name} ({size/1e3:.0f} kB) — "
+                          f"budget full ({total_mb:.0f} MB), stopping")
+                else:
+                    remaining_mb = (self._max_bytes - self._bytes_written) / 1e6
+                    print(f"[auto-record] saved {mp4.name} ({size/1e3:.0f} kB, "
+                          f"{remaining_mb:.0f} MB remaining)")
+        except Exception as e:
+            print(f"[auto-record] save failed for {goal_name}: {e}")
+
 _DEFAULT_WIZARD_PORT = 8080
 
 
@@ -151,6 +267,12 @@ def run(args: argparse.Namespace) -> None:
                 state.update_count(goal.name, 0)
                 state.register_buffer(goal.name, goal.buffer)
 
+    # Auto-record short clips around detected events (live sources only)
+    clips_dir = config_path.parent / "clips"
+    recorder = AutoRecorder(clips_dir) if all(not s.is_video_file for s in sources) else None
+    if recorder and not recorder.full:
+        print(f"[auto-record] enabled → {clips_dir} (1 GB budget)")
+
     progress_last: dict[str, int] = {}
     all_live = all(not s.is_video_file for s in sources)
 
@@ -220,6 +342,13 @@ def run(args: argparse.Namespace) -> None:
                             forwarder.send(alliance, goal.config.pfms_element, event.n_balls)
                         else:
                             print(f"[{goal.name}] WARNING: cannot determine alliance for PFMS")
+
+                # Auto-record on signal activity above 10% of ball_area —
+                # more sensitive than scoring but filters out sensor noise
+                if recorder and not recorder.full:
+                    threshold = goal.config.ball_area * 0.1
+                    if goal.counter.signal > threshold:
+                        recorder.on_activity(goal.name, goal.counter.frame_idx, goal.buffer)
 
         file_sources = sum(1 for s in sources if s.is_video_file)
         if frames_read == 0 and (all_live or file_sources_done >= file_sources):

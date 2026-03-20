@@ -2097,15 +2097,16 @@ def create_app(state: AppState) -> FastAPI:
             color = "red" if "red" in name else ("blue" if "blue" in name else "#888")
             stream_cards += f"""
             <div class="card">
-              <div class="goal-label" style="color:{color}">{name}</div>
-              <div class="count" id="count-{name}">0</div>
-              <div class="btn-row">
-                <button class="score-btn" id="score-{name}" onclick="injectScore('{name}')">+1</button>
+              <div class="card-top">
                 <button class="clear-btn" onclick="resetGoal('{name}')">Clear</button>
+              </div>
+              <div class="goal-label" style="color:{color}">{name}</div>
+              <div class="count" id="count-{name}" onclick="injectScore('{name}')" title="Tap to +1">0</div>
+              <img src="/api/stream/{name}.mjpeg" onerror="this.style.opacity='0.3'" />
+              <div class="clip-row">
                 <button class="clip-btn" id="clip-{name}" onclick="saveClip('{name}')">Save last 60s</button>
                 <button class="capture-btn" id="cap-{name}" onclick="captureScore('{name}')">Capture score</button>
               </div>
-              <img src="/api/stream/{name}.mjpeg" onerror="this.style.opacity='0.3'" />
             </div>"""
 
         return HTMLResponse(f"""<!DOCTYPE html>
@@ -2118,25 +2119,26 @@ def create_app(state: AppState) -> FastAPI:
     body {{ background: #111; color: #eee; font-family: sans-serif; padding: 1rem; }}
     h1 {{ text-align: center; font-size: 1.4rem; margin-bottom: 1rem; color: #aaa; }}
     #goals {{ display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }}
-    .card {{ background: #1e1e1e; border-radius: 8px; padding: 1rem; text-align: center; min-width: 280px; }}
+    .card {{ background: #1e1e1e; border-radius: 8px; padding: 1rem; text-align: center; min-width: 280px; position: relative; }}
+    .card-top {{ display: flex; justify-content: flex-end; margin-bottom: 0.2rem; }}
     .goal-label {{ font-size: 1rem; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 0.4rem; }}
-    .count {{ font-size: 4rem; font-weight: bold; line-height: 1; margin-bottom: 0.6rem; }}
+    .count {{ font-size: 4rem; font-weight: bold; line-height: 1; margin-bottom: 0.6rem; cursor: pointer; user-select: none; transition: text-shadow 0.15s; }}
+    .count:hover {{ text-shadow: 0 0 20px rgba(255, 255, 200, 0.4); }}
+    .count:active {{ text-shadow: 0 0 30px rgba(255, 255, 100, 0.7); }}
     .card img {{ width: 100%; border-radius: 4px; background: #000; display: block; }}
+    .clip-row {{ display: flex; gap: 0.5rem; justify-content: center; margin-top: 0.5rem; flex-wrap: wrap; }}
     #log {{ margin-top: 1.5rem; max-width: 600px; margin-left: auto; margin-right: auto; }}
     #log h2 {{ font-size: 0.9rem; color: #666; margin-bottom: 0.5rem; }}
     #events {{ list-style: none; max-height: 200px; overflow-y: auto; }}
     #events li {{ padding: 0.3rem 0.5rem; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; color: #ccc; }}
     #events li span.flash {{ color: #0f0; font-weight: bold; }}
     #status {{ text-align: center; font-size: 0.75rem; color: #444; margin-top: 1rem; }}
-    .btn-row {{ display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 0.6rem; flex-wrap: wrap; }}
-    .clear-btn, .clip-btn {{ padding: 0.3rem 1rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }}
+    .clear-btn {{ padding: 0.2rem 0.6rem; background: #222; color: #666; border: 1px solid #444; border-radius: 3px; cursor: pointer; font-size: 0.7rem; }}
     .clear-btn:hover {{ background: #500; color: #fff; border-color: #a00; }}
+    .clip-btn {{ padding: 0.3rem 1rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }}
     .clip-btn:hover {{ background: #135; color: #9cf; border-color: #47a; }}
     .clip-btn:disabled {{ opacity: 0.5; cursor: default; }}
-    .score-btn {{ padding: 0.3rem 0.8rem; background: #3a3a1a; color: #fd8; border: 1px solid #885; border-radius: 4px; cursor: pointer; font-size: 1rem; font-weight: bold; }}
-    .score-btn:hover {{ background: #5a5a20; color: #ff0; border-color: #aa6; }}
-    .score-btn.flash {{ background: #8a8a20; color: #fff; border-color: #ff0; }}
-    .capture-btn {{ background: #1a3a1a; color: #8f8; border-color: #383; }}
+    .capture-btn {{ padding: 0.3rem 1rem; background: #1a3a1a; color: #8f8; border: 1px solid #383; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }}
     .capture-btn:hover {{ background: #2a5a2a; color: #afa; border-color: #5a5; }}
     .capture-btn.flash {{ background: #4a8a2a; color: #fff; border-color: #8f8; }}
   </style>
@@ -2164,13 +2166,13 @@ def create_app(state: AppState) -> FastAPI:
     }});
 
     function injectScore(name) {{
-      const btn = document.getElementById('score-' + name);
+      const el = document.getElementById('count-' + name);
       fetch('/api/score/' + name, {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{n_balls: 1}})}})
         .then(() => {{
-          btn.classList.add('flash');
-          setTimeout(() => btn.classList.remove('flash'), 300);
+          el.style.textShadow = '0 0 30px rgba(255, 255, 100, 0.8)';
+          setTimeout(() => el.style.textShadow = '', 300);
         }})
-        .catch(() => {{ btn.textContent = 'Error'; setTimeout(() => btn.textContent = '+1', 2000); }});
+        .catch(() => {{}});
     }}
 
     function captureScore(name) {{
