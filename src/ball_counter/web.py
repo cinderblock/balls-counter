@@ -1203,6 +1203,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
           <button class="anno-btn danger" onclick="undoMark()">Undo</button>
           <button class="anno-btn save-btn" onclick="saveAnnotations()">Save</button>
           <label style="font-size:0.78rem;color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer"><input type="checkbox" id="auto-advance" onchange="localStorage.setItem('pref_autoadvance',this.checked)"/> auto-advance</label>
+          <label style="font-size:0.78rem;color:#888;display:flex;align-items:center;gap:0.3rem;cursor:pointer"><input type="checkbox" id="auto-play" onchange="localStorage.setItem('pref_autoplay',this.checked)"/> autoplay</label>
         </div>
         <div id="my-marks">
           <div style="font-size:0.78rem;color:#666;margin-bottom:0.2rem">My marks: <span id="my-marks-count" style="color:#fc8;font-weight:bold"></span></div>
@@ -1217,7 +1218,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
       <div id="download-row">
         <a id="download-link" href="#">Download zip</a>
         <button class="trim-btn" id="trim-enter-btn" onclick="enterTrimMode()">Trim / Split</button>
-        <span style="color:#555">Shortcuts: Space=mark &nbsp; ]/[=next/prev unannotated &nbsp; ←/→=seek 2s &nbsp; 1-9=balls &nbsp; ,/.=speed down/up</span>
+        <span style="color:#555">Shortcuts: Space=mark &nbsp; Ctrl+Z=undo &nbsp; Ctrl+S=save &nbsp; ]/[=next/prev &nbsp; ←/→=seek 2s &nbsp; 1-9=balls &nbsp; ,/.=speed</span>
       </div>
     </div>
   </div>
@@ -1242,6 +1243,7 @@ let reviewers = {};
 let currentClip = null;   // sidecar JSON
 let myToken = null;
 let myMarks = [];         // [{video_time, frame_idx, timestamp, n_balls}]
+let lastSave = null;      // {clipId, marks, videoTime} for undo-after-save
 let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
 let timelineRAF = null;
 let speedMap = null;      // Uint8Array: 0=fast(2x), 1=near-motion(1x), 2=in-motion(0.25x)
@@ -1287,6 +1289,8 @@ async function init() {
   myToken = getCookie('reviewer_token') || localStorage.getItem('reviewer_token') || null;
   const cb = document.getElementById('auto-advance');
   if (cb) cb.checked = localStorage.getItem('pref_autoadvance') === 'true';
+  const ap = document.getElementById('auto-play');
+  if (ap) ap.checked = localStorage.getItem('pref_autoplay') !== 'false';
   updateAutoSpeedBtn();
   updateSpeedBtns(1);
   await loadReviewers();
@@ -1409,6 +1413,7 @@ async function openClip(id) {
   const video = document.getElementById('video');
   video.src = '/api/clips/' + id + '/video';
   video.load();
+  if (document.getElementById('auto-play')?.checked) video.play().catch(() => {});
 
   // timeline
   drawTimeline();
@@ -1817,7 +1822,25 @@ function markScore() {
 }
 
 function undoMark() {
-  myMarks.pop();
+  // If no marks to undo but we just saved+advanced, revert to previous clip
+  if (myMarks.length === 0 && lastSave) {
+    const save = lastSave;
+    lastSave = null;
+    toast('Undoing save, returning to ' + save.clipId, 'info');
+    openClip(save.clipId).then(() => {
+      myMarks = save.marks;
+      renderMyMarks();
+      drawTimeline();
+      const video = document.getElementById('video');
+      video.currentTime = save.videoTime;
+    });
+    return;
+  }
+  const removed = myMarks.pop();
+  if (removed) {
+    const video = document.getElementById('video');
+    video.currentTime = Math.max(0, removed.video_time - 1);
+  }
   renderMyMarks();
   drawTimeline();
 }
@@ -1874,6 +1897,9 @@ function renderOtherReviewers() {
 async function saveAnnotations() {
   if (!currentClip || !myToken) { toast('Select a reviewer first.', 'err'); return; }
   const label = (reviewers[myToken] && reviewers[myToken].label) || myToken;
+  const video = document.getElementById('video');
+  // Snapshot for undo
+  lastSave = {clipId: currentClip.id, marks: JSON.parse(JSON.stringify(myMarks)), videoTime: video.currentTime};
   const r = await fetch('/api/clips/' + currentClip.id + '/annotations', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({token: myToken, label, marks: myMarks})
@@ -1889,6 +1915,7 @@ async function saveAnnotations() {
       nextUnannotated();
     }
   } else {
+    lastSave = null;
     const detail = await r.json().then(d => d.detail || JSON.stringify(d)).catch(() => r.statusText);
     toast('Save failed: ' + detail, 'err', 5000);
   }
@@ -2057,10 +2084,12 @@ async function applyTrim() {
 
 // ── keyboard shortcuts ────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
+  if (e.code === 'Escape' && trimMode) { e.preventDefault(); exitTrimMode(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') { e.preventDefault(); undoMark(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') { e.preventDefault(); saveAnnotations(); return; }
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   const video = document.getElementById('video');
-  if (e.code === 'Escape' && trimMode) { e.preventDefault(); exitTrimMode(); return; }
   if (e.code === 'Space') { e.preventDefault(); markScore(); }
   else if (e.code === 'BracketRight') { e.preventDefault(); nextUnannotated(); }
   else if (e.code === 'ArrowLeft') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 2); }
