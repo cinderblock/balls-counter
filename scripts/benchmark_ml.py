@@ -161,6 +161,33 @@ def detect_ml(signal: np.ndarray, fps: float, ml_detector: MLPeakDetector
     return events
 
 
+def detect_hybrid(signal: np.ndarray, fps: float, goal_config,
+                  ml_detector: MLPeakDetector, tolerance: float = 0.5,
+                  **threshold_overrides) -> list[float]:
+    """Hybrid: threshold for immediate detections, ML fills in what it missed.
+
+    1. Run threshold detector → high-confidence events
+    2. Run ML detector frame-by-frame → all events including close ones
+    3. Keep all threshold events
+    4. Add ML events that aren't near any threshold event (the missed ones)
+    """
+    sig_1d = signal[:, 0] if signal.ndim == 2 else signal
+    thresh_events = detect_threshold(sig_1d, fps, goal_config, **threshold_overrides)
+    ml_events = detect_ml(signal, fps, ml_detector)
+
+    # Start with all threshold events
+    combined = list(thresh_events)
+
+    # Add ML events that threshold missed
+    for ml_t in ml_events:
+        near_thresh = any(abs(ml_t - te) < tolerance for te in thresh_events)
+        if not near_thresh:
+            combined.append(ml_t)
+
+    combined.sort()
+    return combined
+
+
 # ── Matching ──────────────────────────────────────────────────────────────────
 
 def get_all_marks(clip: dict, dedup_window: float = 0.15) -> list[float]:
@@ -339,6 +366,16 @@ def main():
                 "channels": ml_channels,
             },
         }
+        hybrid_label = f"hybrid-{ml_channels}ch" if ml_channels > 1 else "hybrid"
+        methods[hybrid_label] = {
+            "params": {
+                "model": str(model_path),
+                "threshold": args.threshold,
+                "min_distance": args.min_distance,
+                "channels": ml_channels,
+                "strategy": "threshold + ML fill-in",
+            },
+        }
 
     # Fingerprints for all current clips
     clip_fingerprints = {name: info["fingerprint"] for name, info in all_clips.items()}
@@ -386,7 +423,8 @@ def main():
         print(f"  {method_name}: evaluating {len(stale)} clips "
               f"({len(current_clips) - len(stale)} cached)")
 
-        need_multi = method_name.startswith("ml") and args.model and ml_channels > 1
+        needs_ml = method_name.startswith("ml") or method_name.startswith("hybrid")
+        need_multi = needs_ml and args.model and ml_channels > 1
 
         for clip_name in stale:
             info = all_clips[clip_name]
@@ -397,9 +435,17 @@ def main():
                 continue
 
             if method_name == "threshold":
-                # Threshold only uses area (1D)
                 sig_1d = signal[:, 0] if signal.ndim == 2 else signal
                 auto = detect_threshold(sig_1d, fps, info["gc"], **threshold_overrides)
+            elif method_name.startswith("hybrid"):
+                ml_det = MLPeakDetector(
+                    str(model_path),
+                    threshold=args.threshold,
+                    min_distance=args.min_distance,
+                    ball_area=info["gc"].ball_area,
+                )
+                auto = detect_hybrid(signal, fps, info["gc"], ml_det,
+                                     tolerance=0.3, **threshold_overrides)
             elif method_name.startswith("ml"):
                 ml_det = MLPeakDetector(
                     str(model_path),

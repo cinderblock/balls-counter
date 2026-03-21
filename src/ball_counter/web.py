@@ -413,6 +413,9 @@ const DS_OPTS = [0.25, 0.5, 0.75, 1.0];
 let linesByBox = {};    // {boxId: {p1:[cx,cy], p2:[cx,cy]}} zoomed canvas coords
 let boxZooms   = {};    // {boxId: number}
 let lineDrags  = {};    // {boxId: {x0,y0,x1,y1}} in-progress draws
+let polysByBox = {};    // {boxId: [[x,y], ...]} polygon vertices in zoomed coords
+let existingPolysFull = {}; // {boxId: [[fx,fy], ...]} full-frame polygon coords
+let drawModes  = {};    // {boxId: 'line'|'poly'} drawing mode per goal
 
 // ── preload ───────────────────────────────────────────────────────────────────
 let _existingConfig = null;
@@ -426,7 +429,7 @@ function goStep(n) {
     buildLinePanels();
   }
   if (n === 4) {
-    if (!boxes.some(b => linesByBox[b.id])) { showMsg('line-msgs','err','Draw a counting line in at least one crop window.'); return; }
+    if (!boxes.some(b => linesByBox[b.id] || (polysByBox[b.id] && polysByBox[b.id].length >= 3))) { showMsg('line-msgs','err','Draw a counting line or polygon in at least one crop window.'); return; }
     buildTunePanel();
   }
   if (n === 5) { syncTuneToState(); buildJsonPreview(); }
@@ -444,6 +447,7 @@ function addAnotherCamera() {
   if (boxes.length === 0) { showMsg('draw-msgs','err','Draw at least one crop window for this stream first.'); return; }
   bankCurrentStream();
   boxes = []; linesByBox = {}; existingLinesFull = {}; boxZooms = {}; lineDrags = {};
+  polysByBox = {}; existingPolysFull = {}; drawModes = {};
   showMsg('draw-msgs',''); showMsg('line-msgs','');
   goStep(1);
 }
@@ -542,6 +546,7 @@ function onBoxDown(e) {
       const id = boxes[bi].id;
       boxes.splice(bi,1);
       delete linesByBox[id]; delete existingLinesFull[id]; delete boxZooms[id];
+      delete polysByBox[id]; delete existingPolysFull[id]; delete drawModes[id];
       redrawBoxCanvas(); updateRamEst();
     }
   }
@@ -676,7 +681,7 @@ function updateRamEst() {
     `<span class="msg ${cls}" style="display:inline-block">~${mb} MB estimated RAM for 60s buffer</span>`;
 }
 
-// ── step 3: zoomed line drawing ───────────────────────────────────────────────
+// ── step 3: zoomed geometry drawing (line or polygon) ────────────────────────
 function buildLinePanels() {
   const container = document.getElementById('line-panels');
   container.innerHTML = '';
@@ -689,7 +694,13 @@ function buildLinePanels() {
     boxZooms[b.id] = zoom;
     const cvW = Math.round(fw*zoom), cvH = Math.round(fh*zoom);
 
-    // Convert full-frame preloaded line to zoomed coords (once)
+    // Default draw mode
+    if (!drawModes[b.id]) {
+      if (existingPolysFull[b.id]) drawModes[b.id] = 'poly';
+      else drawModes[b.id] = 'line';
+    }
+
+    // Convert full-frame preloaded geometry to zoomed coords (once)
     if (existingLinesFull[b.id] && !linesByBox[b.id]) {
       const ef = existingLinesFull[b.id];
       linesByBox[b.id] = {
@@ -697,11 +708,30 @@ function buildLinePanels() {
         p2: [(ef.p2[0]-fx)*zoom, (ef.p2[1]-fy)*zoom],
       };
     }
+    if (existingPolysFull[b.id] && !polysByBox[b.id]) {
+      polysByBox[b.id] = existingPolysFull[b.id].map(pt => [(pt[0]-fx)*zoom, (pt[1]-fy)*zoom]);
+    }
 
     const clrHex = b.color==='red' ? '#e66' : '#66f';
     const section = document.createElement('div');
     section.className = 'crop-section';
-    section.innerHTML = `<h3 style="color:${clrHex}">${b.name} &mdash; ${fw}×${fh}px (shown ${cvW}×${cvH})</h3>`;
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:8px';
+    header.innerHTML = `<h3 style="color:${clrHex};margin:0">${b.name} &mdash; ${fw}×${fh}px</h3>
+      <label style="cursor:pointer"><input type="radio" name="mode-${b.id}" value="line" ${drawModes[b.id]==='line'?'checked':''}> Line</label>
+      <label style="cursor:pointer"><input type="radio" name="mode-${b.id}" value="poly" ${drawModes[b.id]==='poly'?'checked':''}> Polygon (ROI)</label>
+      <button class="btn" style="margin-left:auto;font-size:12px" id="clear-${b.id}">Clear</button>`;
+    section.appendChild(header);
+
+    // Mode toggle
+    header.querySelectorAll(`input[name="mode-${b.id}"]`).forEach(radio => {
+      radio.onchange = () => { drawModes[b.id] = radio.value; redrawGeomCanvas(cvs); };
+    });
+    header.querySelector(`#clear-${b.id}`).onclick = () => {
+      delete linesByBox[b.id]; delete polysByBox[b.id];
+      redrawGeomCanvas(cvs); redrawBoxCanvas();
+    };
 
     const wrap = document.createElement('div');
     wrap.className = 'crop-canvas-wrap';
@@ -711,36 +741,90 @@ function buildLinePanels() {
     cvs._boxId = b.id; cvs._zoom = zoom; cvs._origin = {fx, fy, fw, fh};
 
     const img = new Image();
-    img.onload = () => { cvs._img = img; redrawLineCanvas(cvs); };
+    img.onload = () => { cvs._img = img; redrawGeomCanvas(cvs); };
     img.src = `/api/wizard/frame/${state.token}/crop.jpg?x=${fx}&y=${fy}&w=${fw}&h=${fh}`;
 
     function cvsXY(e, canvas) {
       const r = canvas.getBoundingClientRect();
       return [(e.clientX-r.left)*(canvas.width/r.width), (e.clientY-r.top)*(canvas.height/r.height)];
     }
+
+    // ── Line drawing handlers ──
     cvs.onmousedown = e => {
+      if (drawModes[b.id] !== 'line') return;
       const [x,y] = cvsXY(e, cvs);
       lineDrags[b.id] = {x0:x, y0:y, x1:x, y1:y};
     };
     cvs.onmousemove = e => {
-      const ld = lineDrags[b.id]; if (!ld) return;
-      const [x,y] = cvsXY(e, cvs);
-      ld.x1 = x; ld.y1 = y; redrawLineCanvas(cvs, ld);
+      if (drawModes[b.id] === 'line') {
+        const ld = lineDrags[b.id]; if (!ld) return;
+        const [x,y] = cvsXY(e, cvs);
+        ld.x1 = x; ld.y1 = y; redrawGeomCanvas(cvs, ld);
+      } else {
+        // Poly: show cursor follower for next vertex
+        const [x,y] = cvsXY(e, cvs);
+        cvs._polyHover = [x,y]; redrawGeomCanvas(cvs);
+      }
     };
     const finishLine = () => {
+      if (drawModes[b.id] !== 'line') return;
       const ld = lineDrags[b.id]; if (!ld) return;
       if (Math.hypot(ld.x1-ld.x0, ld.y1-ld.y0) > 5) {
         linesByBox[b.id] = {p1:[ld.x0,ld.y0], p2:[ld.x1,ld.y1]};
-        redrawBoxCanvas();  // update ✓ badge on step-2 canvas
+        delete polysByBox[b.id];
+        redrawBoxCanvas();
       }
       delete lineDrags[b.id];
-      redrawLineCanvas(cvs);
+      redrawGeomCanvas(cvs);
     };
-    cvs.onmouseup = finishLine;
-    cvs.onmouseleave = finishLine;
+    cvs.onmouseup = e => {
+      if (drawModes[b.id] === 'line') finishLine();
+    };
+    cvs.onmouseleave = e => {
+      if (drawModes[b.id] === 'line') finishLine();
+      cvs._polyHover = null;
+    };
+
+    // ── Polygon drawing handlers ──
+    cvs.onclick = e => {
+      if (drawModes[b.id] !== 'poly') return;
+      const [x,y] = cvsXY(e, cvs);
+      if (!polysByBox[b.id]) polysByBox[b.id] = [];
+      const pts = polysByBox[b.id];
+      // Close polygon if clicking near first vertex
+      if (pts.length >= 3) {
+        const d = Math.hypot(x-pts[0][0], y-pts[0][1]);
+        if (d < 15) {
+          // Polygon closed — done
+          delete linesByBox[b.id];
+          redrawGeomCanvas(cvs); redrawBoxCanvas();
+          return;
+        }
+      }
+      pts.push([x,y]);
+      redrawGeomCanvas(cvs);
+    };
+    cvs.ondblclick = e => {
+      if (drawModes[b.id] !== 'poly') return;
+      e.preventDefault();
+      const pts = polysByBox[b.id];
+      if (pts && pts.length >= 3) {
+        delete linesByBox[b.id];
+        redrawGeomCanvas(cvs); redrawBoxCanvas();
+      }
+    };
 
     wrap.appendChild(cvs);
     section.appendChild(wrap);
+
+    // Instructions
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:12px;color:#888;margin-top:4px';
+    hint.innerHTML = drawModes[b.id] === 'line'
+      ? 'Click and drag to draw a counting line.'
+      : 'Click to add polygon vertices. Click near the first point or double-click to close.';
+    section.appendChild(hint);
+
     container.appendChild(section);
   }
 }
@@ -752,14 +836,16 @@ function bandPoly(p1,p2,bw) {
   return [[p1[0]+nx,p1[1]+ny],[p2[0]+nx,p2[1]+ny],[p2[0]-nx,p2[1]-ny],[p1[0]-nx,p1[1]-ny]];
 }
 
-function redrawLineCanvas(cvs, drawing) {
+function redrawGeomCanvas(cvs, lineDrawing) {
   const ctx = cvs.getContext('2d');
   ctx.clearRect(0,0,cvs.width,cvs.height);
   if (cvs._img && cvs._img.complete) ctx.drawImage(cvs._img,0,0,cvs.width,cvs.height);
   const b = boxes.find(x => x.id === cvs._boxId);
   const clr = b?.color==='red' ? '#e44' : '#44f';
   const bw  = (b?.band_width ?? 10) * cvs._zoom;
+  const mode = drawModes[cvs._boxId] || 'line';
 
+  // Draw line
   function drawOneLine(p1, p2, alpha) {
     const poly = bandPoly(p1,p2,bw);
     if (poly) {
@@ -774,9 +860,55 @@ function redrawLineCanvas(cvs, drawing) {
     ctx.restore();
   }
 
-  const line = linesByBox[cvs._boxId];
-  if (line) drawOneLine(line.p1, line.p2, 1);
-  if (drawing) drawOneLine([drawing.x0,drawing.y0],[drawing.x1,drawing.y1], 0.5);
+  // Draw polygon
+  function drawPoly(pts, alpha, closed) {
+    if (pts.length < 1) return;
+    ctx.save(); ctx.globalAlpha=alpha||1;
+    // Fill if closed (>= 3 points)
+    if (closed && pts.length >= 3) {
+      ctx.globalAlpha=(alpha||1)*0.25; ctx.fillStyle=clr;
+      ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+      for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha=alpha||1;
+    }
+    // Stroke outline
+    ctx.strokeStyle=clr; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+    for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+    if (closed) ctx.closePath();
+    ctx.stroke();
+    // Vertices
+    pts.forEach((pt,i) => {
+      ctx.fillStyle = (i===0 && pts.length >= 3) ? '#0f0' : clr;
+      ctx.beginPath(); ctx.arc(pt[0],pt[1], i===0?6:4, 0,Math.PI*2); ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  if (mode === 'line') {
+    const line = linesByBox[cvs._boxId];
+    if (line) drawOneLine(line.p1, line.p2, 1);
+    if (lineDrawing) drawOneLine([lineDrawing.x0,lineDrawing.y0],[lineDrawing.x1,lineDrawing.y1], 0.5);
+  } else {
+    const pts = polysByBox[cvs._boxId];
+    if (pts && pts.length > 0) {
+      const closed = pts.length >= 3 && !cvs._polyHover;
+      drawPoly(pts, 1, closed);
+      // Draw preview edge to cursor
+      if (cvs._polyHover && pts.length > 0) {
+        ctx.save(); ctx.globalAlpha=0.5; ctx.strokeStyle=clr; ctx.lineWidth=1; ctx.setLineDash([5,5]);
+        ctx.beginPath(); ctx.moveTo(pts[pts.length-1][0],pts[pts.length-1][1]);
+        ctx.lineTo(cvs._polyHover[0],cvs._polyHover[1]);
+        if (pts.length >= 2) {
+          // Also preview close line
+          ctx.moveTo(cvs._polyHover[0],cvs._polyHover[1]);
+          ctx.lineTo(pts[0][0],pts[0][1]);
+        }
+        ctx.stroke(); ctx.restore();
+      }
+    }
+  }
 }
 
 // ── step 4: tune ──────────────────────────────────────────────────────────────
@@ -784,12 +916,12 @@ function buildTunePanel() {
   const list = document.getElementById('goal-list');
   list.innerHTML = '';
   boxes.forEach((b, i) => {
-    const hasLine = !!linesByBox[b.id];
+    const hasLine = !!linesByBox[b.id] || (polysByBox[b.id] && polysByBox[b.id].length >= 3);
     const clr = b.color==='red' ? '#e66' : '#66f';
     const det = document.createElement('details');
     det.className='goal-item'; det.open=true; det.dataset.idx=i;
     det.innerHTML = `<summary><span style="color:${clr}">■</span> ${b.name}` +
-      (hasLine ? '' : ' <small style="color:#a63">(no line — skipped in save)</small>') +
+      (hasLine ? '' : ' <small style="color:#a63">(no line/polygon — skipped in save)</small>') +
       `</summary><div class="goal-fields">
   <div class="field-group full"><label>Name</label><input type="text" class="g-name" value="${b.name}"/></div>
   <div class="field-group"><label>Mode</label><select class="g-mode">
@@ -870,18 +1002,27 @@ function updateRamSummary() {
 // ── step 5: save ──────────────────────────────────────────────────────────────
 function buildCurrentGoals() {
   const sc = state.frameScale;
-  return boxes.filter(b => linesByBox[b.id]).map(b => {
+  return boxes.filter(b => linesByBox[b.id] || (polysByBox[b.id] && polysByBox[b.id].length >= 3)).map(b => {
     const fx=Math.round(b.cx/sc), fy=Math.round(b.cy/sc);
     const fw=Math.round(b.cw/sc), fh=Math.round(b.ch/sc);
-    const line=linesByBox[b.id], zoom=boxZooms[b.id]||1;
-    return {
+    const zoom=boxZooms[b.id]||1;
+    const goal = {
       name:b.name, color:b.color, mode:b.mode,
-      p1:[fx+Math.round(line.p1[0]/zoom), fy+Math.round(line.p1[1]/zoom)],
-      p2:[fx+Math.round(line.p2[0]/zoom), fy+Math.round(line.p2[1]/zoom)],
       crop:{x:fx,y:fy,w:fw,h:fh},
       ball_area:b.ball_area, band_width:b.band_width, fall_ratio:b.fall_ratio,
       min_peak:b.min_peak, cooldown:b.cooldown, downsample:b.downsample,
     };
+    const line = linesByBox[b.id];
+    const poly = polysByBox[b.id];
+    if (poly && poly.length >= 3) {
+      goal.roi_points = poly.map(pt => [fx+Math.round(pt[0]/zoom), fy+Math.round(pt[1]/zoom)]);
+      goal.geom = 'poly';
+    } else if (line) {
+      goal.p1 = [fx+Math.round(line.p1[0]/zoom), fy+Math.round(line.p1[1]/zoom)];
+      goal.p2 = [fx+Math.round(line.p2[0]/zoom), fy+Math.round(line.p2[1]/zoom)];
+      goal.geom = 'line';
+    }
+    return goal;
   });
 }
 
@@ -897,10 +1038,15 @@ function buildSavePayload() {
     goals: goals.map(g => {
       const obj = {
         name:g.name, mode:g.mode, draw_color:g.color==='red'?[0,0,255]:[255,0,0],
-        line:[g.p1,g.p2], crop_override:[g.crop.x,g.crop.y,g.crop.x+g.crop.w,g.crop.y+g.crop.h],
+        crop_override:[g.crop.x,g.crop.y,g.crop.x+g.crop.w,g.crop.y+g.crop.h],
         ball_area:g.ball_area, band_width:g.band_width, fall_ratio:g.fall_ratio,
         min_peak:g.min_peak, cooldown:g.cooldown,
       };
+      if (g.geom === 'poly' && g.roi_points) {
+        obj.roi_points = g.roi_points;
+      } else if (g.p1 && g.p2) {
+        obj.line = [g.p1, g.p2];
+      }
       if (g.downsample && g.downsample!==1.0) obj.downsample = g.downsample;
       if (g.pfms_element) obj.pfms_element = g.pfms_element;
       return obj;
@@ -972,6 +1118,7 @@ function loadExistingBoxes(sourceUrl) {
       cooldown:g.cooldown??0, downsample:g.downsample??1.0,
       pfms_element:g.pfms_element||null});
     if (g.line) existingLinesFull[id] = {p1:g.line[0], p2:g.line[1]};
+    if (g.roi_points && g.roi_points.length >= 3) existingPolysFull[id] = g.roi_points;
   }
   redrawBoxCanvas(); updateRamEst();
 }
