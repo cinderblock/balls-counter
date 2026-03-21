@@ -24,11 +24,12 @@ if HAS_TORCH:
         Must match the architecture in scripts/train_peak_model.py.
         """
 
-        def __init__(self):
+        def __init__(self, in_channels: int = 1):
             super().__init__()
+            self.in_channels = in_channels
             channels = 48
             self.input_conv = nn.Sequential(
-                nn.Conv1d(1, channels, kernel_size=3, padding=1),
+                nn.Conv1d(in_channels, channels, kernel_size=3, padding=1),
                 nn.BatchNorm1d(channels),
                 nn.ReLU(),
             )
@@ -91,13 +92,15 @@ class MLPeakDetector:
         # Load model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(model_path, map_location=self.device, weights_only=True)
-        self.model = PeakDetector1D().to(self.device)
+        self.in_channels = ckpt.get("in_channels", 1)
+        self.model = PeakDetector1D(in_channels=self.in_channels).to(self.device)
         self.model.load_state_dict(ckpt["model_state"])
         self.model.eval()
-        self.signal_norm = ckpt["signal_norm"]
+        self.signal_norm = np.atleast_1d(np.asarray(ckpt["signal_norm"], dtype=np.float32))
 
         # Rolling signal history (keeps context around bursts)
-        self._all_signals: list[float] = []
+        # Each entry is a tuple of (area, n_contours, cx, cy, bw, bh) or just (area,)
+        self._all_signals: list[tuple] = []
         self._all_start_frame: int = 0  # frame_idx of _all_signals[0]
         # Burst tracking
         self._burst_start_idx: int = 0  # index into _all_signals
@@ -111,22 +114,30 @@ class MLPeakDetector:
         # Running count
         self.count = 0
 
-    def process_signal(self, signal_value: int, frame_idx: int, peak_area: int = 0) -> MotionEvent | None:
-        """Process one frame's signal value. Returns MotionEvent if available.
+    def process_signal(self, signal_value: int | tuple[int, ...], frame_idx: int,
+                       peak_area: int = 0) -> MotionEvent | None:
+        """Process one frame's signal value(s). Returns MotionEvent if available.
 
-        Keeps a rolling history of all signal values. When activity is
-        detected, marks the burst start. When activity settles (quiet_frames
-        of low signal), runs the model on the full history window around
-        the burst — including pre/post context — exactly as the benchmark does.
+        Args:
+            signal_value: Either a single int (area) or a tuple of features
+                          from counter.signal_features.
+            frame_idx: Global frame index.
+            peak_area: Unused, kept for API compat.
         """
         # Emit pending events first (one per call)
         if self._pending_events:
             return self._pending_events.pop(0)
 
+        # Normalize input to tuple
+        if isinstance(signal_value, (int, float)):
+            features = (int(signal_value),)
+        else:
+            features = tuple(int(v) for v in signal_value)
+
         # Track signal history
         if not self._all_signals:
             self._all_start_frame = frame_idx
-        self._all_signals.append(float(signal_value))
+        self._all_signals.append(features)
 
         # Trim old history (keep ~600 frames = 20s)
         max_history = 600
@@ -136,7 +147,9 @@ class MLPeakDetector:
             self._all_start_frame += excess
             self._burst_start_idx = max(0, self._burst_start_idx - excess)
 
-        active = signal_value > 50
+        # Activity is based on area (first channel)
+        area = features[0]
+        active = area > 50
 
         if active:
             if not self._in_burst:
@@ -166,14 +179,22 @@ class MLPeakDetector:
         start_idx = max(0, self._burst_start_idx - context_pad)
         end_idx = len(self._all_signals)  # includes quiet tail
 
-        buf_array = np.array(self._all_signals[start_idx:end_idx], dtype=np.float32)
-        if len(buf_array) < 5:
+        window = self._all_signals[start_idx:end_idx]
+        if len(window) < 5:
             return []
 
-        normed = np.clip(buf_array / self.signal_norm, 0, 3.0)
+        # Build array: (T, C) where C = number of features per frame
+        buf_array = np.array(window, dtype=np.float32)  # (T,) or (T, C)
+        if buf_array.ndim == 1:
+            buf_array = buf_array[:, np.newaxis]  # (T, 1)
+
+        # Per-channel normalize
+        normed = buf_array / self.signal_norm[np.newaxis, :]
+        normed = np.clip(normed, 0, 3.0)
 
         with torch.no_grad():
-            x = torch.tensor(normed, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
+            # (1, C, T) for Conv1d
+            x = torch.tensor(normed.T, dtype=torch.float32).unsqueeze(0).to(self.device)
             logits = self.model(x)
             probs = torch.sigmoid(logits).cpu().numpy()[0]
 
@@ -186,7 +207,7 @@ class MLPeakDetector:
             # Skip events too close to previously detected ones
             if abs(abs_frame - self._last_detected_frame) <= self.min_distance:
                 continue
-            area = int(buf_array[buf_idx]) if buf_idx < len(buf_array) else 0
+            area = int(buf_array[buf_idx, 0]) if buf_idx < len(buf_array) else 0
             n_balls = max(1, round(area / self.ball_area)) if area > 0 else 1
             self.count += n_balls
             self._last_detected_frame = abs_frame

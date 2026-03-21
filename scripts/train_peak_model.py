@@ -34,20 +34,21 @@ class PeakDetector1D(nn.Module):
     """Fully-convolutional 1D model for detecting ball events in signal traces.
 
     Architecture: stack of dilated conv blocks → per-frame logit
-    Input:  (batch, 1, T) — normalized signal values, variable length T
+    Input:  (batch, C, T) — C signal channels, variable length T
     Output: (batch, T) — per-frame event logit (sigmoid → probability)
 
     Uses dilated convolutions for large receptive field without pooling,
     preserving temporal resolution needed to separate events 4-5 frames apart.
     """
 
-    def __init__(self):
+    def __init__(self, in_channels: int = 1):
         super().__init__()
+        self.in_channels = in_channels
 
         # Dilated conv stack: receptive field = 1 + 2*(3-1)*(1+2+4+8+16) = 125 frames
         channels = 48
         self.input_conv = nn.Sequential(
-            nn.Conv1d(1, channels, kernel_size=3, padding=1),
+            nn.Conv1d(in_channels, channels, kernel_size=3, padding=1),
             nn.BatchNorm1d(channels),
             nn.ReLU(),
         )
@@ -99,27 +100,48 @@ def make_gaussian_targets(labels: np.ndarray, sigma: float = 1.0) -> np.ndarray:
 
 
 class SignalDataset(Dataset):
-    """Dataset of full signal traces with Gaussian peak targets."""
+    """Dataset of full signal traces with Gaussian peak targets.
+
+    Handles both 1D (N_frames,) and multi-channel (N_frames, C) signals.
+    """
 
     def __init__(self, signals: list[np.ndarray], labels: list[np.ndarray],
-                 sigma: float = 1.0, signal_norm: float | None = None):
+                 sigma: float = 1.0, signal_norm: np.ndarray | float | None = None):
 
-        # Compute normalization from training data
+        # Determine dimensionality
+        sample = signals[0]
+        self.n_channels = sample.shape[1] if sample.ndim == 2 else 1
+
+        # Compute per-channel normalization from training data
         if signal_norm is None:
-            all_vals = np.concatenate(signals)
-            self.signal_norm = float(np.percentile(all_vals[all_vals > 0], 99)) if np.any(all_vals > 0) else 1.0
+            if self.n_channels > 1:
+                stacked = np.concatenate(signals, axis=0)  # (total_frames, C)
+                self.signal_norm = np.zeros(self.n_channels, dtype=np.float32)
+                for c in range(self.n_channels):
+                    col = stacked[:, c]
+                    pos = col[col > 0]
+                    self.signal_norm[c] = float(np.percentile(pos, 99)) if len(pos) > 0 else 1.0
+            else:
+                all_vals = np.concatenate(signals)
+                self.signal_norm = np.array([
+                    float(np.percentile(all_vals[all_vals > 0], 99)) if np.any(all_vals > 0) else 1.0
+                ], dtype=np.float32)
         else:
-            self.signal_norm = signal_norm
+            self.signal_norm = np.atleast_1d(np.asarray(signal_norm, dtype=np.float32))
 
         self.signals = []
         self.targets = []
         self.n_marks = []
 
         for sig, lab in zip(signals, labels):
-            # Normalize signal
-            normed = sig / self.signal_norm
+            # Ensure 2D: (T, C)
+            if sig.ndim == 1:
+                sig = sig[:, np.newaxis]
+            # Per-channel normalize
+            normed = sig / self.signal_norm[np.newaxis, :]
             normed = np.clip(normed, 0, 3.0)
-            self.signals.append(torch.tensor(normed, dtype=torch.float32))
+            # Store as (C, T) for Conv1d
+            self.signals.append(torch.tensor(normed.T, dtype=torch.float32))
 
             # Gaussian targets
             target = make_gaussian_targets(lab, sigma=sigma)
@@ -127,9 +149,10 @@ class SignalDataset(Dataset):
             self.n_marks.append(int(lab.sum()))
 
         total_marks = sum(self.n_marks)
-        total_frames = sum(len(s) for s in self.signals)
+        total_frames = sum(s.shape[1] for s in self.signals)
+        norm_str = ", ".join(f"{v:.0f}" for v in self.signal_norm)
         print(f"  Dataset: {len(self.signals)} clips, {total_frames} frames, "
-              f"{total_marks} marks, norm={self.signal_norm:.0f}")
+              f"{total_marks} marks, {self.n_channels}ch, norm=[{norm_str}]")
 
     def __len__(self):
         return len(self.signals)
@@ -141,17 +164,22 @@ class SignalDataset(Dataset):
 def collate_fn(batch):
     """Pad variable-length sequences to the same length in a batch."""
     signals, targets, n_marks = zip(*batch)
-    # Pad to max length in batch
-    signals_padded = pad_sequence(signals, batch_first=True)  # (B, T_max)
+
+    # signals are (C, T) — pad along T dimension
+    # pad_sequence expects (T, ...) so transpose, pad, transpose back
+    signals_t = [s.T for s in signals]  # list of (T, C)
+    signals_padded = pad_sequence(signals_t, batch_first=True)  # (B, T_max, C)
+    signals_padded = signals_padded.permute(0, 2, 1)  # (B, C, T_max)
+
     targets_padded = pad_sequence(targets, batch_first=True)  # (B, T_max)
 
     # Create mask for valid positions
-    lengths = torch.tensor([len(s) for s in signals])
-    mask = torch.arange(signals_padded.size(1)).unsqueeze(0) < lengths.unsqueeze(1)
+    lengths = torch.tensor([s.shape[1] for s in signals])  # T dimension
+    mask = torch.arange(signals_padded.size(2)).unsqueeze(0) < lengths.unsqueeze(1)
 
-    return (signals_padded.unsqueeze(1),  # (B, 1, T)
-            targets_padded,                # (B, T)
-            mask,                          # (B, T)
+    return (signals_padded,    # (B, C, T)
+            targets_padded,    # (B, T)
+            mask,              # (B, T)
             torch.tensor(n_marks))
 
 
@@ -214,7 +242,8 @@ def train(
     labels = list(data["labels"])
     clip_names = list(data["clip_names"])
 
-    print(f"Loaded {len(signals)} clips")
+    n_channels = int(data["n_channels"]) if "n_channels" in data else 1
+    print(f"Loaded {len(signals)} clips, {n_channels} channel(s)")
 
     # Train/val split by clip
     n = len(signals)
@@ -242,7 +271,7 @@ def train(
                             collate_fn=collate_fn, num_workers=4, pin_memory=True)
 
     # Model
-    model = PeakDetector1D().to(device)
+    model = PeakDetector1D(in_channels=train_ds.n_channels).to(device)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"\nModel: {param_count:,} parameters")
 
@@ -338,7 +367,8 @@ def train(
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({
                 "model_state": model.state_dict(),
-                "signal_norm": float(train_ds.signal_norm),
+                "signal_norm": train_ds.signal_norm.tolist(),
+                "in_channels": train_ds.n_channels,
                 "sigma": sigma,
                 "val_mae": float(mae),
                 "val_counts": f"{total_predicted}/{total_human}",

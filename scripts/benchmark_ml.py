@@ -36,8 +36,8 @@ from ball_counter.ml_detector import MLPeakDetector
 
 # ── Signal extraction ─────────────────────────────────────────────────────────
 
-def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0
-                             ) -> tuple[np.ndarray, float]:
+def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0,
+                             multi_channel: bool = False) -> tuple[np.ndarray, float]:
     """Extract raw signal trace from a clip using the MotionCounter pipeline."""
     cap = cv2.VideoCapture(str(mp4_path))
     if not cap.isOpened():
@@ -84,7 +84,9 @@ def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0
             sw, sh = max(1, int(w * ds)), max(1, int(h * ds))
             frame = cv2.resize(frame, (sw, sh))
         counter.process_frame(frame)
-        return counter.signal
+        if multi_channel:
+            return counter.signal_features
+        return (counter.signal,)
 
     signals.append(feed(first))
     while True:
@@ -94,7 +96,10 @@ def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0
         signals.append(feed(frame))
 
     cap.release()
-    return np.array(signals, dtype=np.float32), actual_fps
+    arr = np.array(signals, dtype=np.float32)
+    if not multi_channel:
+        arr = arr[:, 0]  # back to 1D
+    return arr, actual_fps
 
 
 # ── Detection methods ─────────────────────────────────────────────────────────
@@ -139,14 +144,18 @@ def detect_threshold(signal: np.ndarray, fps: float, goal_config,
 def detect_ml(signal: np.ndarray, fps: float, ml_detector: MLPeakDetector
               ) -> list[float]:
     """ML peak detector, frame-by-frame (same as live path)."""
+    multi = signal.ndim == 2
+    n_frames = len(signal)
     events: list[float] = []
-    for i, val in enumerate(signal):
-        ev = ml_detector.process_signal(int(val), i)
+    for i in range(n_frames):
+        val = tuple(int(v) for v in signal[i]) if multi else int(signal[i])
+        ev = ml_detector.process_signal(val, i)
         if ev is not None:
             events.append(ev.frame / fps)
     # Drain pending events
+    zero = (0,) * (signal.shape[1] if multi else 1)
     for i in range(100):
-        ev = ml_detector.process_signal(0, len(signal) + i)
+        ev = ml_detector.process_signal(zero if multi else 0, n_frames + i)
         if ev is not None:
             events.append(ev.frame / fps)
     return events
@@ -301,6 +310,7 @@ def main():
         results_data = {"methods": {}}
 
     # Define methods to benchmark
+    ml_channels = 1
     methods = {
         "threshold": {
             "params": {
@@ -314,11 +324,19 @@ def main():
         if not model_path.exists():
             print(f"Model not found: {model_path}", file=sys.stderr)
             sys.exit(1)
-        methods["ml-1dcnn"] = {
+        # Peek at model to get channel count
+        import torch as _torch
+        _ckpt = _torch.load(str(model_path), map_location="cpu", weights_only=True)
+        ml_channels = _ckpt.get("in_channels", 1)
+        del _ckpt
+
+        method_label = f"ml-{ml_channels}ch" if ml_channels > 1 else "ml-1dcnn"
+        methods[method_label] = {
             "params": {
                 "model": str(model_path),
                 "threshold": args.threshold,
                 "min_distance": args.min_distance,
+                "channels": ml_channels,
             },
         }
 
@@ -368,16 +386,21 @@ def main():
         print(f"  {method_name}: evaluating {len(stale)} clips "
               f"({len(current_clips) - len(stale)} cached)")
 
+        need_multi = method_name.startswith("ml") and args.model and ml_channels > 1
+
         for clip_name in stale:
             info = all_clips[clip_name]
             signal, fps = extract_signal_from_clip(
-                info["mp4"], info["gc"], info["clip"].get("fps", 30.0))
+                info["mp4"], info["gc"], info["clip"].get("fps", 30.0),
+                multi_channel=need_multi)
             if len(signal) == 0:
                 continue
 
             if method_name == "threshold":
-                auto = detect_threshold(signal, fps, info["gc"], **threshold_overrides)
-            elif method_name == "ml-1dcnn":
+                # Threshold only uses area (1D)
+                sig_1d = signal[:, 0] if signal.ndim == 2 else signal
+                auto = detect_threshold(sig_1d, fps, info["gc"], **threshold_overrides)
+            elif method_name.startswith("ml"):
                 ml_det = MLPeakDetector(
                     str(model_path),
                     threshold=args.threshold,

@@ -27,11 +27,21 @@ from ball_counter.config import load_configs
 from ball_counter.counter import MotionCounter
 
 
-def extract_signal(mp4_path: Path, goal_config, fps_hint: float = 30.0) -> tuple[np.ndarray, float]:
-    """Run signal extraction on a clip. Returns (signal_array, fps)."""
+N_FEATURES = 6  # area, n_contours, centroid_x, centroid_y, bbox_w, bbox_h
+
+
+def extract_signal(mp4_path: Path, goal_config, fps_hint: float = 30.0,
+                   multi_channel: bool = False) -> tuple[np.ndarray, float]:
+    """Run signal extraction on a clip.
+
+    Returns (signal_array, fps).
+    If multi_channel=False: signal_array is 1D (N_frames,) — area only.
+    If multi_channel=True:  signal_array is 2D (N_frames, 6) — all features.
+    """
     cap = cv2.VideoCapture(str(mp4_path))
     if not cap.isOpened():
-        return np.array([], dtype=np.float32), fps_hint
+        empty = np.array([], dtype=np.float32)
+        return empty, fps_hint
 
     actual_fps = cap.get(cv2.CAP_PROP_FPS) or fps_hint
     ds = goal_config.downsample
@@ -77,7 +87,9 @@ def extract_signal(mp4_path: Path, goal_config, fps_hint: float = 30.0) -> tuple
             sw, sh = max(1, int(w * ds)), max(1, int(h * ds))
             frame = cv2.resize(frame, (sw, sh))
         counter.process_frame(frame)
-        return counter.signal
+        if multi_channel:
+            return counter.signal_features
+        return (counter.signal,)
 
     signals.append(feed(first))
     while True:
@@ -87,7 +99,10 @@ def extract_signal(mp4_path: Path, goal_config, fps_hint: float = 30.0) -> tuple
         signals.append(feed(frame))
 
     cap.release()
-    return np.array(signals, dtype=np.float32), actual_fps
+    arr = np.array(signals, dtype=np.float32)
+    if not multi_channel:
+        arr = arr[:, 0]  # flatten back to 1D for backwards compat
+    return arr, actual_fps
 
 
 def get_all_marks(clip: dict, dedup_window: float = 0.15) -> list[float]:
@@ -109,6 +124,8 @@ def main():
     ap.add_argument("clips_dir", help="Directory with clip MP4s + JSON sidecars")
     ap.add_argument("--config", required=True, help="Config JSON for goal geometry")
     ap.add_argument("-o", "--output", default="data/signals.npz", help="Output .npz path")
+    ap.add_argument("--multi-channel", action="store_true",
+                    help="Extract 6-channel features (area, n_contours, cx, cy, bw, bh)")
     args = ap.parse_args()
 
     clips_dir = Path(args.clips_dir)
@@ -148,7 +165,8 @@ def main():
         if not marks:
             continue
 
-        signal, fps = extract_signal(mp4, gc, clip.get("fps", 30.0))
+        signal, fps = extract_signal(mp4, gc, clip.get("fps", 30.0),
+                                     multi_channel=args.multi_channel)
         if len(signal) == 0:
             continue
 
@@ -180,6 +198,7 @@ def main():
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    n_channels = N_FEATURES if args.multi_channel else 1
     np.savez(
         out,
         # Variable-length arrays stored as object arrays
@@ -188,9 +207,11 @@ def main():
         clip_names=np.array(all_clip_names),
         fps=np.array(all_fps, dtype=np.float32),
         mark_counts=np.array(all_mark_counts, dtype=np.int32),
+        n_channels=np.array(n_channels, dtype=np.int32),
     )
 
-    print(f"\nSaved {len(all_signals)} clips, {total_frames} frames, {total_marks} marks → {out}")
+    ch_str = f"{n_channels}ch" if args.multi_channel else "1ch"
+    print(f"\nSaved {len(all_signals)} clips, {total_frames} frames, {total_marks} marks, {ch_str} → {out}")
 
 
 if __name__ == "__main__":

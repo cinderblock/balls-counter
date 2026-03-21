@@ -102,10 +102,13 @@ class GoalProcessor:
 
         # Use ML detector if available, otherwise fall back to threshold
         if self.ml_detector is not None:
+            if self.ml_detector.in_channels > 1:
+                sig = self.counter.signal_features
+            else:
+                sig = self.counter.signal
             event = self.ml_detector.process_signal(
-                self.counter.signal,
+                sig,
                 self.counter.frame_idx,
-                peak_area=self.counter.signal,
             )
             # Sync count from ML detector back to counter for display
             if event is not None:

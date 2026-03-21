@@ -2571,6 +2571,7 @@ def create_app(state: AppState) -> FastAPI:
             "marks": marks,
         }
         jsn.write_text(json.dumps(data, indent=2))
+        print(f"review   - {label} saved annotations for {clip_id}")
         return {"ok": True}
 
     @app.get("/api/clips/{clip_id}/agreement")

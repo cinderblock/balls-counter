@@ -97,6 +97,7 @@ class MotionCounter:
         self.rising = False
         self.peak_val = 0
         self.cooldown_remaining = 0
+        self._last_moving_in_zone: np.ndarray | None = None
 
         # Results
         self.count = 0
@@ -111,6 +112,7 @@ class MotionCounter:
         yellow = create_mask(frame, self.hsv_low, self.hsv_high)
         moving_yellow = cv2.bitwise_and(yellow, fg_mask)
         moving_in_zone = cv2.bitwise_and(moving_yellow, self.mask)
+        self._last_moving_in_zone = moving_in_zone
         area = cv2.countNonZero(moving_in_zone)
 
         event = None
@@ -139,6 +141,33 @@ class MotionCounter:
     def signal(self) -> int:
         """Current signal value (moving yellow pixels in zone)."""
         return self.prev_area
+
+    @property
+    def signal_features(self) -> tuple[int, ...]:
+        """Multi-channel signal features for the current frame.
+
+        Returns (area, n_contours, centroid_x, centroid_y, bbox_w, bbox_h):
+          - area: total moving yellow pixels in zone (same as .signal)
+          - n_contours: number of separate blobs (proxy for ball count)
+          - centroid_x, centroid_y: centroid of all moving pixels (0 if none)
+          - bbox_w, bbox_h: bounding box of all moving pixels (0 if none)
+        """
+        if self._last_moving_in_zone is None or self.prev_area == 0:
+            return (self.prev_area, 0, 0, 0, 0, 0)
+
+        mask = self._last_moving_in_zone
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        n_contours = len(contours)
+
+        points = cv2.findNonZero(mask)
+        if points is not None:
+            cx = int(points[:, 0, 0].mean())
+            cy = int(points[:, 0, 1].mean())
+            x, y, bw, bh = cv2.boundingRect(points)
+        else:
+            cx, cy, bw, bh = 0, 0, 0, 0
+
+        return (self.prev_area, n_contours, cx, cy, bw, bh)
 
     def draw(self, frame: np.ndarray, alpha: float = 0.2,
              color: tuple[int, int, int] = (0, 0, 255)) -> None:
