@@ -694,11 +694,8 @@ function buildLinePanels() {
     boxZooms[b.id] = zoom;
     const cvW = Math.round(fw*zoom), cvH = Math.round(fh*zoom);
 
-    // Default draw mode
-    if (!drawModes[b.id]) {
-      if (existingPolysFull[b.id]) drawModes[b.id] = 'poly';
-      else drawModes[b.id] = 'line';
-    }
+    // Default draw mode is always line; poly mode only while actively drawing
+    if (!drawModes[b.id]) drawModes[b.id] = 'line';
 
     // Convert full-frame preloaded geometry to zoomed coords (once)
     if (existingLinesFull[b.id] && !linesByBox[b.id]) {
@@ -716,28 +713,45 @@ function buildLinePanels() {
     const section = document.createElement('div');
     section.className = 'crop-section';
 
+    const hasPoly = polysByBox[b.id] && polysByBox[b.id].length >= 3;
     const header = document.createElement('div');
-    header.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:8px';
+    header.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap';
     header.innerHTML = `<h3 style="color:${clrHex};margin:0">${b.name} &mdash; ${fw}×${fh}px</h3>
-      <label style="cursor:pointer"><input type="radio" name="mode-${b.id}" value="line" ${drawModes[b.id]==='line'?'checked':''}> Line</label>
-      <label style="cursor:pointer"><input type="radio" name="mode-${b.id}" value="poly" ${drawModes[b.id]==='poly'?'checked':''}> Polygon (ROI)</label>
-      <button class="btn" style="margin-left:auto;font-size:12px" id="clear-${b.id}">Clear</button>`;
+      <button class="btn" style="font-size:12px" id="draw-roi-${b.id}">${hasPoly ? 'Redraw' : 'Draw'} ROI Polygon</button>
+      ${hasPoly ? `<button class="btn" style="font-size:12px" id="clear-roi-${b.id}">Clear ROI</button>` : ''}
+      <button class="btn" style="margin-left:auto;font-size:12px" id="clear-all-${b.id}">Clear All</button>`;
     section.appendChild(header);
 
-    // Mode toggle
-    header.querySelectorAll(`input[name="mode-${b.id}"]`).forEach(radio => {
-      radio.onchange = () => {
-        drawModes[b.id] = radio.value;
-        redrawGeomCanvas(cvs);
-        const h = document.getElementById(`hint-${b.id}`);
-        if (h) h.innerHTML = radio.value === 'line'
-          ? 'Click and drag to draw a counting line.'
-          : 'Click to add vertices. Close: click green dot or Enter or double-click. Undo: right-click or Ctrl+Z. Esc to clear.';
-      };
-    });
-    header.querySelector(`#clear-${b.id}`).onclick = () => {
-      delete linesByBox[b.id]; delete polysByBox[b.id];
-      redrawGeomCanvas(cvs); redrawBoxCanvas();
+    function updateHeader() {
+      const hp = polysByBox[b.id] && polysByBox[b.id].length >= 3;
+      const btn = header.querySelector(`#draw-roi-${b.id}`);
+      if (btn) btn.textContent = (hp ? 'Redraw' : 'Draw') + ' ROI Polygon';
+      // Add/remove clear ROI button
+      const existing = header.querySelector(`#clear-roi-${b.id}`);
+      if (hp && !existing) {
+        const cb = document.createElement('button');
+        cb.className = 'btn'; cb.style.fontSize = '12px'; cb.id = `clear-roi-${b.id}`;
+        cb.textContent = 'Clear ROI';
+        cb.onclick = () => { delete polysByBox[b.id]; drawModes[b.id] = 'line'; redrawGeomCanvas(cvs); redrawBoxCanvas(); updateHeader(); updateHint(); };
+        btn.after(cb);
+      } else if (!hp && existing) existing.remove();
+    }
+
+    header.querySelector(`#draw-roi-${b.id}`).onclick = () => {
+      delete polysByBox[b.id];
+      drawModes[b.id] = 'poly';
+      cvs.focus();
+      redrawGeomCanvas(cvs);
+      updateHint();
+    };
+    const clearRoiBtn = header.querySelector(`#clear-roi-${b.id}`);
+    if (clearRoiBtn) clearRoiBtn.onclick = () => {
+      delete polysByBox[b.id]; drawModes[b.id] = 'line';
+      redrawGeomCanvas(cvs); redrawBoxCanvas(); updateHeader(); updateHint();
+    };
+    header.querySelector(`#clear-all-${b.id}`).onclick = () => {
+      delete linesByBox[b.id]; delete polysByBox[b.id]; drawModes[b.id] = 'line';
+      redrawGeomCanvas(cvs); redrawBoxCanvas(); updateHeader(); updateHint();
     };
 
     const wrap = document.createElement('div');
@@ -778,7 +792,6 @@ function buildLinePanels() {
       const ld = lineDrags[b.id]; if (!ld) return;
       if (Math.hypot(ld.x1-ld.x0, ld.y1-ld.y0) > 5) {
         linesByBox[b.id] = {p1:[ld.x0,ld.y0], p2:[ld.x1,ld.y1]};
-        delete polysByBox[b.id];
         redrawBoxCanvas();
       }
       delete lineDrags[b.id];
@@ -796,9 +809,9 @@ function buildLinePanels() {
     function finishPoly() {
       const pts = polysByBox[b.id];
       if (pts && pts.length >= 3) {
-        delete linesByBox[b.id];
         cvs._polyHover = null;
-        redrawGeomCanvas(cvs); redrawBoxCanvas();
+        drawModes[b.id] = 'line';  // exit poly mode
+        redrawGeomCanvas(cvs); redrawBoxCanvas(); updateHeader(); updateHint();
       }
     }
     function undoPolyVertex() {
@@ -846,7 +859,7 @@ function buildLinePanels() {
       if (drawModes[b.id] !== 'poly') return;
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undoPolyVertex(); }
       if (e.key === 'Enter') { e.preventDefault(); finishPoly(); }
-      if (e.key === 'Escape') { e.preventDefault(); delete polysByBox[b.id]; cvs._polyHover = null; redrawGeomCanvas(cvs); }
+      if (e.key === 'Escape') { e.preventDefault(); delete polysByBox[b.id]; cvs._polyHover = null; drawModes[b.id] = 'line'; redrawGeomCanvas(cvs); updateHeader(); updateHint(); }
     };
     // Auto-focus canvas when in poly mode
     cvs.onmouseenter = () => { if (drawModes[b.id] === 'poly') cvs.focus(); };
@@ -855,9 +868,12 @@ function buildLinePanels() {
     const hint = document.createElement('div');
     hint.id = `hint-${b.id}`;
     hint.style.cssText = 'font-size:12px;color:#888;margin-top:4px';
-    hint.innerHTML = drawModes[b.id] === 'line'
-      ? 'Click and drag to draw a counting line.'
-      : 'Click to add vertices. Close: click green dot or Enter or double-click. Undo: right-click or Ctrl+Z. Esc to clear.';
+    function updateHint() {
+      hint.innerHTML = drawModes[b.id] === 'poly'
+        ? 'Drawing ROI: click to add vertices. Close: click green dot / Enter / double-click. Undo: right-click / Ctrl+Z. Esc to cancel.'
+        : 'Drag to draw counting line. Use buttons above to add/edit ROI polygon.';
+    }
+    updateHint();
     section.appendChild(hint);
 
     container.appendChild(section);
@@ -921,29 +937,30 @@ function redrawGeomCanvas(cvs, lineDrawing) {
     ctx.restore();
   }
 
-  if (mode === 'line') {
-    const line = linesByBox[cvs._boxId];
-    if (line) drawOneLine(line.p1, line.p2, 1);
-    if (lineDrawing) drawOneLine([lineDrawing.x0,lineDrawing.y0],[lineDrawing.x1,lineDrawing.y1], 0.5);
-  } else {
-    const pts = polysByBox[cvs._boxId];
-    if (pts && pts.length > 0) {
-      const closed = pts.length >= 3 && !cvs._polyHover;
-      drawPoly(pts, 1, closed);
-      // Draw preview edge to cursor
-      if (cvs._polyHover && pts.length > 0) {
-        ctx.save(); ctx.globalAlpha=0.5; ctx.strokeStyle=clr; ctx.lineWidth=1; ctx.setLineDash([5,5]);
-        ctx.beginPath(); ctx.moveTo(pts[pts.length-1][0],pts[pts.length-1][1]);
-        ctx.lineTo(cvs._polyHover[0],cvs._polyHover[1]);
-        if (pts.length >= 2) {
-          // Also preview close line
-          ctx.moveTo(cvs._polyHover[0],cvs._polyHover[1]);
-          ctx.lineTo(pts[0][0],pts[0][1]);
-        }
-        ctx.stroke(); ctx.restore();
+  // Always draw polygon first (underneath), then line on top
+  const polyClr = b?.color==='red' ? 'rgba(228,68,68' : 'rgba(68,68,255';
+  const pts = polysByBox[cvs._boxId];
+  if (pts && pts.length > 0) {
+    const isDrawing = mode === 'poly' && cvs._polyHover;
+    const closed = pts.length >= 3 && !isDrawing;
+    drawPoly(pts, closed ? 0.8 : 1, closed);
+    // Draw preview edge to cursor while placing vertices
+    if (isDrawing) {
+      ctx.save(); ctx.globalAlpha=0.5; ctx.strokeStyle=clr; ctx.lineWidth=1; ctx.setLineDash([5,5]);
+      ctx.beginPath(); ctx.moveTo(pts[pts.length-1][0],pts[pts.length-1][1]);
+      ctx.lineTo(cvs._polyHover[0],cvs._polyHover[1]);
+      if (pts.length >= 2) {
+        ctx.moveTo(cvs._polyHover[0],cvs._polyHover[1]);
+        ctx.lineTo(pts[0][0],pts[0][1]);
       }
+      ctx.stroke(); ctx.restore();
     }
   }
+
+  // Always draw line
+  const line = linesByBox[cvs._boxId];
+  if (line) drawOneLine(line.p1, line.p2, 1);
+  if (lineDrawing) drawOneLine([lineDrawing.x0,lineDrawing.y0],[lineDrawing.x1,lineDrawing.y1], 0.5);
 }
 
 // ── step 4: tune ──────────────────────────────────────────────────────────────
@@ -1049,13 +1066,12 @@ function buildCurrentGoals() {
     };
     const line = linesByBox[b.id];
     const poly = polysByBox[b.id];
-    if (poly && poly.length >= 3) {
-      goal.roi_points = poly.map(pt => [fx+Math.round(pt[0]/zoom), fy+Math.round(pt[1]/zoom)]);
-      goal.geom = 'poly';
-    } else if (line) {
+    if (line) {
       goal.p1 = [fx+Math.round(line.p1[0]/zoom), fy+Math.round(line.p1[1]/zoom)];
       goal.p2 = [fx+Math.round(line.p2[0]/zoom), fy+Math.round(line.p2[1]/zoom)];
-      goal.geom = 'line';
+    }
+    if (poly && poly.length >= 3) {
+      goal.roi_points = poly.map(pt => [fx+Math.round(pt[0]/zoom), fy+Math.round(pt[1]/zoom)]);
     }
     return goal;
   });
@@ -1077,11 +1093,8 @@ function buildSavePayload() {
         ball_area:g.ball_area, band_width:g.band_width, fall_ratio:g.fall_ratio,
         min_peak:g.min_peak, cooldown:g.cooldown,
       };
-      if (g.geom === 'poly' && g.roi_points) {
-        obj.roi_points = g.roi_points;
-      } else if (g.p1 && g.p2) {
-        obj.line = [g.p1, g.p2];
-      }
+      if (g.p1 && g.p2) obj.line = [g.p1, g.p2];
+      if (g.roi_points) obj.roi_points = g.roi_points;
       if (g.downsample && g.downsample!==1.0) obj.downsample = g.downsample;
       if (g.pfms_element) obj.pfms_element = g.pfms_element;
       return obj;
