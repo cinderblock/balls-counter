@@ -726,7 +726,14 @@ function buildLinePanels() {
 
     // Mode toggle
     header.querySelectorAll(`input[name="mode-${b.id}"]`).forEach(radio => {
-      radio.onchange = () => { drawModes[b.id] = radio.value; redrawGeomCanvas(cvs); };
+      radio.onchange = () => {
+        drawModes[b.id] = radio.value;
+        redrawGeomCanvas(cvs);
+        const h = document.getElementById(`hint-${b.id}`);
+        if (h) h.innerHTML = radio.value === 'line'
+          ? 'Click and drag to draw a counting line.'
+          : 'Click to add vertices. Close: click green dot or Enter or double-click. Undo: right-click or Ctrl+Z. Esc to clear.';
+      };
     });
     header.querySelector(`#clear-${b.id}`).onclick = () => {
       delete linesByBox[b.id]; delete polysByBox[b.id];
@@ -786,6 +793,22 @@ function buildLinePanels() {
     };
 
     // ── Polygon drawing handlers ──
+    function finishPoly() {
+      const pts = polysByBox[b.id];
+      if (pts && pts.length >= 3) {
+        delete linesByBox[b.id];
+        cvs._polyHover = null;
+        redrawGeomCanvas(cvs); redrawBoxCanvas();
+      }
+    }
+    function undoPolyVertex() {
+      const pts = polysByBox[b.id];
+      if (pts && pts.length > 0) {
+        pts.pop();
+        if (pts.length === 0) delete polysByBox[b.id];
+        redrawGeomCanvas(cvs);
+      }
+    }
     cvs.onclick = e => {
       if (drawModes[b.id] !== 'poly') return;
       const [x,y] = cvsXY(e, cvs);
@@ -794,12 +817,7 @@ function buildLinePanels() {
       // Close polygon if clicking near first vertex
       if (pts.length >= 3) {
         const d = Math.hypot(x-pts[0][0], y-pts[0][1]);
-        if (d < 15) {
-          // Polygon closed — done
-          delete linesByBox[b.id];
-          redrawGeomCanvas(cvs); redrawBoxCanvas();
-          return;
-        }
+        if (d < 15) { finishPoly(); return; }
       }
       pts.push([x,y]);
       redrawGeomCanvas(cvs);
@@ -807,22 +825,39 @@ function buildLinePanels() {
     cvs.ondblclick = e => {
       if (drawModes[b.id] !== 'poly') return;
       e.preventDefault();
+      // Remove the extra vertex added by the click event before dblclick
       const pts = polysByBox[b.id];
-      if (pts && pts.length >= 3) {
-        delete linesByBox[b.id];
-        redrawGeomCanvas(cvs); redrawBoxCanvas();
-      }
+      if (pts && pts.length > 3) pts.pop();
+      finishPoly();
+    };
+    cvs.oncontextmenu = e => {
+      if (drawModes[b.id] !== 'poly') return;
+      e.preventDefault();
+      undoPolyVertex();
     };
 
     wrap.appendChild(cvs);
     section.appendChild(wrap);
 
+    // Keyboard: Ctrl+Z undo, Enter finish
+    cvs.tabIndex = 0;
+    cvs.style.outline = 'none';
+    cvs.onkeydown = e => {
+      if (drawModes[b.id] !== 'poly') return;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undoPolyVertex(); }
+      if (e.key === 'Enter') { e.preventDefault(); finishPoly(); }
+      if (e.key === 'Escape') { e.preventDefault(); delete polysByBox[b.id]; cvs._polyHover = null; redrawGeomCanvas(cvs); }
+    };
+    // Auto-focus canvas when in poly mode
+    cvs.onmouseenter = () => { if (drawModes[b.id] === 'poly') cvs.focus(); };
+
     // Instructions
     const hint = document.createElement('div');
+    hint.id = `hint-${b.id}`;
     hint.style.cssText = 'font-size:12px;color:#888;margin-top:4px';
     hint.innerHTML = drawModes[b.id] === 'line'
       ? 'Click and drag to draw a counting line.'
-      : 'Click to add polygon vertices. Click near the first point or double-click to close.';
+      : 'Click to add vertices. Close: click green dot or Enter or double-click. Undo: right-click or Ctrl+Z. Esc to clear.';
     section.appendChild(hint);
 
     container.appendChild(section);
