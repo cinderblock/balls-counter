@@ -57,8 +57,10 @@ class GoalProcessor:
         def offset_scale(pts: list[list[int]]) -> list[list[int]]:
             return [[int((p[0] - x1) * ds), int((p[1] - y1) * ds)] for p in pts]
 
+        # MotionCounter takes either line or roi, not both.
+        # When both are present, use line for detection (roi is stored for future use).
         line = tuple(offset_scale(self.config.line)) if self.config.line else None
-        roi = offset_scale(self.config.roi_points) if self.config.roi_points else None
+        roi = offset_scale(self.config.roi_points) if self.config.roi_points and not line else None
 
         crop_h, crop_w = y2 - y1, x2 - x1
         scaled_h = int(crop_h * ds)
