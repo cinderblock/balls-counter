@@ -259,17 +259,19 @@ class SourceProcessor:
         if self._is_video_file:
             return False
         print(f"[{self.source}] stream dropped, reconnecting...")
-        for attempt in range(1, 6):
-            time.sleep(2 * attempt)
+        attempt = 0
+        delay = 2
+        while True:
+            attempt += 1
+            time.sleep(delay)
             if self._reopen():
                 ret, frame = self.cap.read()
                 if ret:
                     self._frame = frame
-                    print(f"[{self.source}] reconnected")
+                    print(f"[{self.source}] reconnected after {attempt} attempt(s)")
                     return True
-            print(f"[{self.source}] reconnect attempt {attempt} failed")
-        print(f"[{self.source}] giving up after 5 attempts")
-        return False
+            print(f"[{self.source}] reconnect attempt {attempt} failed, next retry in {delay}s")
+            delay = min(delay * 2, 300)
 
     def process_frame(self) -> list[tuple[GoalProcessor, MotionEvent | None]]:
         """Process the current frame through all goal counters."""
