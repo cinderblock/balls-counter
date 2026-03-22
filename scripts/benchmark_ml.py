@@ -32,13 +32,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from ball_counter.config import load_configs
 from ball_counter.counter import MotionCounter
 from ball_counter.ml_detector import MLPeakDetector
+from ball_counter.roi_detector import ROIBlobDetector
 
 
 # ── Signal extraction ─────────────────────────────────────────────────────────
 
 def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0,
-                             multi_channel: bool = False) -> tuple[np.ndarray, float]:
-    """Extract raw signal trace from a clip using the MotionCounter pipeline."""
+                             multi_channel: bool = False,
+                             use_roi: bool = False) -> tuple[np.ndarray, float]:
+    """Extract raw signal trace from a clip using the MotionCounter pipeline.
+
+    If use_roi=True and roi_points exist, uses ROI ring mode instead of line band.
+    """
     cap = cv2.VideoCapture(str(mp4_path))
     if not cap.isOpened():
         return np.array([], dtype=np.float32), fps_hint
@@ -63,8 +68,13 @@ def extract_signal_from_clip(mp4_path: Path, goal_config, fps_hint: float = 30.0
     def offset_scale(pts):
         return [[int((p[0] - x1) * ds), int((p[1] - y1) * ds)] for p in pts]
 
-    line = tuple(offset_scale(goal_config.line)) if goal_config.line else None
-    roi = offset_scale(goal_config.roi_points) if goal_config.roi_points else None
+    # Pick geometry: roi if requested and available, else line
+    if use_roi and goal_config.roi_points:
+        line = None
+        roi = offset_scale(goal_config.roi_points)
+    else:
+        line = tuple(offset_scale(goal_config.line)) if goal_config.line else None
+        roi = offset_scale(goal_config.roi_points) if (goal_config.roi_points and not line) else None
 
     counter = MotionCounter(
         frame_shape=(scaled_h, scaled_w),
@@ -159,6 +169,64 @@ def detect_ml(signal: np.ndarray, fps: float, ml_detector: MLPeakDetector
         if ev is not None:
             events.append(ev.frame / fps)
     return events
+
+
+def detect_roi_blob(mp4_path: Path, goal_config, fps_hint: float = 30.0
+                    ) -> tuple[list[float], float]:
+    """Run ROI blob detector on a clip. Returns (event_times, fps)."""
+    cap = cv2.VideoCapture(str(mp4_path))
+    if not cap.isOpened():
+        return [], fps_hint
+
+    actual_fps = cap.get(cv2.CAP_PROP_FPS) or fps_hint
+    ds = goal_config.downsample
+
+    ret, first = cap.read()
+    if not ret:
+        cap.release()
+        return [], actual_fps
+
+    h, w = first.shape[:2]
+    x1, y1 = 0, 0
+    if goal_config.crop_override:
+        x1, y1 = goal_config.crop_override[0], goal_config.crop_override[1]
+
+    scaled_w = max(1, int(w * ds))
+    scaled_h = max(1, int(h * ds))
+
+    def offset_scale(pts):
+        return [[int((p[0] - x1) * ds), int((p[1] - y1) * ds)] for p in pts]
+
+    roi = offset_scale(goal_config.roi_points)
+
+    detector = ROIBlobDetector(
+        frame_shape=(scaled_h, scaled_w),
+        roi_points=roi,
+        hsv_low=goal_config.hsv_low,
+        hsv_high=goal_config.hsv_high,
+        min_area=50,
+    )
+
+    def feed(frame):
+        if ds != 1.0:
+            sw, sh = max(1, int(w * ds)), max(1, int(h * ds))
+            frame = cv2.resize(frame, (sw, sh))
+        return detector.process_frame(frame)
+
+    feed(first)  # init bg model
+    event_times = []
+    frame_idx = 1
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        ev = feed(frame)
+        if ev is not None:
+            event_times.append(frame_idx / actual_fps)
+        frame_idx += 1
+
+    cap.release()
+    return event_times, actual_fps
 
 
 def detect_hybrid(signal: np.ndarray, fps: float, goal_config,
@@ -336,6 +404,9 @@ def main():
     if args.force:
         results_data = {"methods": {}}
 
+    # Check if any goal has roi_points
+    has_roi = any(gc.roi_points for gc in goal_configs.values())
+
     # Define methods to benchmark
     ml_channels = 1
     methods = {
@@ -346,6 +417,20 @@ def main():
             },
         },
     }
+    if has_roi:
+        methods["threshold-roi"] = {
+            "params": {
+                "geometry": "roi_points (ring mask + peak detect)",
+                "fall_ratio": threshold_overrides.get("fall_ratio", "config"),
+                "cooldown": threshold_overrides.get("cooldown", "config"),
+            },
+        }
+        methods["roi-blob"] = {
+            "params": {
+                "geometry": "roi_points (blob tracking, outlet mode)",
+                "min_area": 50,
+            },
+        }
     if args.model:
         model_path = Path(args.model)
         if not model_path.exists():
@@ -425,37 +510,48 @@ def main():
 
         needs_ml = method_name.startswith("ml") or method_name.startswith("hybrid")
         need_multi = needs_ml and args.model and ml_channels > 1
+        needs_roi = method_name.endswith("-roi") or method_name == "roi-blob"
+        needs_video = method_name == "roi-blob"  # needs raw frames, not signal
 
         for clip_name in stale:
             info = all_clips[clip_name]
-            signal, fps = extract_signal_from_clip(
-                info["mp4"], info["gc"], info["clip"].get("fps", 30.0),
-                multi_channel=need_multi)
-            if len(signal) == 0:
+            # Skip ROI methods for goals without roi_points
+            if needs_roi and not info["gc"].roi_points:
                 continue
 
-            if method_name == "threshold":
-                sig_1d = signal[:, 0] if signal.ndim == 2 else signal
-                auto = detect_threshold(sig_1d, fps, info["gc"], **threshold_overrides)
-            elif method_name.startswith("hybrid"):
-                ml_det = MLPeakDetector(
-                    str(model_path),
-                    threshold=args.threshold,
-                    min_distance=args.min_distance,
-                    ball_area=info["gc"].ball_area,
-                )
-                auto = detect_hybrid(signal, fps, info["gc"], ml_det,
-                                     tolerance=0.3, **threshold_overrides)
-            elif method_name.startswith("ml"):
-                ml_det = MLPeakDetector(
-                    str(model_path),
-                    threshold=args.threshold,
-                    min_distance=args.min_distance,
-                    ball_area=info["gc"].ball_area,
-                )
-                auto = detect_ml(signal, fps, ml_det)
+            if needs_video:
+                # ROI blob runs directly on video frames
+                auto, fps = detect_roi_blob(
+                    info["mp4"], info["gc"], info["clip"].get("fps", 30.0))
             else:
-                continue
+                signal, fps = extract_signal_from_clip(
+                    info["mp4"], info["gc"], info["clip"].get("fps", 30.0),
+                    multi_channel=need_multi, use_roi=needs_roi)
+                if len(signal) == 0:
+                    continue
+
+                if method_name in ("threshold", "threshold-roi"):
+                    sig_1d = signal[:, 0] if signal.ndim == 2 else signal
+                    auto = detect_threshold(sig_1d, fps, info["gc"], **threshold_overrides)
+                elif method_name.startswith("hybrid"):
+                    ml_det = MLPeakDetector(
+                        str(model_path),
+                        threshold=args.threshold,
+                        min_distance=args.min_distance,
+                        ball_area=info["gc"].ball_area,
+                    )
+                    auto = detect_hybrid(signal, fps, info["gc"], ml_det,
+                                         tolerance=0.3, **threshold_overrides)
+                elif method_name.startswith("ml"):
+                    ml_det = MLPeakDetector(
+                        str(model_path),
+                        threshold=args.threshold,
+                        min_distance=args.min_distance,
+                        ball_area=info["gc"].ball_area,
+                    )
+                    auto = detect_ml(signal, fps, ml_det)
+                else:
+                    continue
 
             tp, fp, fn = match_events(auto, info["marks"], args.tolerance)
             method_data["clips"][clip_name] = {
