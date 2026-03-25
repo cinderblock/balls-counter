@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -242,6 +243,12 @@ def _load_reviewers(clips_dir: Path) -> dict:
 def _save_reviewers(clips_dir: Path, reviewers: dict) -> None:
     rf = clips_dir / "reviewers.json"
     rf.write_text(json.dumps(reviewers, indent=2))
+
+
+def _is_admin(token: str, clips_dir: Path) -> bool:
+    reviewers = _load_reviewers(clips_dir)
+    label = reviewers.get(token, {}).get("label", "")
+    return label.startswith("*")
 
 
 _WIZARD_HTML = r"""<!DOCTYPE html>
@@ -1283,6 +1290,8 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
 #footer-bar{display:flex;align-items:center;gap:0.8rem;font-size:0.8rem;color:#888;padding:0.4rem 0;margin-top:auto;border-top:1px solid #333;flex-shrink:0}
 /* empty state */
 #empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:1rem}
+/* flag button */
+#flag-btn{transition:border-color 0.2s, color 0.2s}
 /* trim mode */
 #trim-toolbar{display:none;margin:0.4rem 0;padding:0.5rem;background:#1a1a1a;border:1px solid #333;border-radius:4px}
 #trim-toolbar.active{display:block}
@@ -1359,6 +1368,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
         <option value="all">All clips</option>
         <option value="annotated">Annotated by me</option>
         <option value="unannotated">Unannotated by me</option>
+        <option value="flagged">Flagged for review</option>
       </select>
       <select id="clip-sort" onchange="renderClipList()">
         <option value="newest">Newest first</option>
@@ -1416,6 +1426,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
           <button class="speed-btn" data-rate="4"    onclick="setSpeed(4)">4×</button>
           </span>
           <label class="toggle-btn on" id="autospeed-btn" onclick="toggleAutoSpeed()">Auto-speed</label>
+          <button class="trim-btn" id="flag-btn" onclick="toggleFlag()">Flag for review</button>
           <button class="trim-btn" id="trim-enter-btn" onclick="enterTrimMode()">Trim / Split</button>
         </div>
         <div id="my-marks">
@@ -1509,6 +1520,7 @@ async function init() {
   await loadReviewers();
   await loadClips();
   renderClipList();
+  updateTrimVisibility();
   if (location.hash) {
     const id = location.hash.slice(1);
     const clip = allClips.find(c => c.id === id);
@@ -1552,6 +1564,7 @@ async function createReviewer() {
   localStorage.setItem('reviewer_token', myToken);
   hideModal();
   await loadReviewers();
+  updateTrimVisibility();
   if (currentClip) openClip(currentClip.id);
   else nextUnannotated();
 }
@@ -1576,6 +1589,7 @@ function renderClipList() {
     if (search && !c.id.toLowerCase().includes(search) && !c.goal.toLowerCase().includes(search)) return false;
     if (filter === 'annotated' && !(myToken && c.annotators.includes(myToken))) return false;
     if (filter === 'unannotated' && myToken && c.annotators.includes(myToken)) return false;
+    if (filter === 'flagged' && !c.flagged) return false;
     return true;
   });
   if (sort === 'oldest') filtered.reverse();
@@ -1600,7 +1614,8 @@ function renderClipList() {
       '</div>' +
       '<div class="clip-badge ' + (annotated ? 'badge-annotated' : 'badge-unannotated') + '">' +
         (annotated ? '&#x2713; annotated' : '&#x25cb; unannotated') +
-      '</div>';
+      '</div>' +
+      (clip.flagged ? '<div style="color:#fc8;font-size:0.7rem">&#x26a0; flagged</div>' : '');
     div.onclick = () => openClip(clip.id);
     list.appendChild(div);
   }
@@ -1648,6 +1663,7 @@ async function openClip(id) {
   // marks
   renderMyMarks();
   renderOtherReviewers();
+  updateFlagBtn();
 
   // agreement
   loadAgreement();
@@ -2195,6 +2211,44 @@ function setCookie(name, val, days) {
 }
 
 // ── trim / split ──────────────────────────────────────────────────────────────
+async function toggleFlag() {
+  if (!currentClip || !myToken) { toast('Open a clip and sign in first', 'err'); return; }
+  const reason = prompt('Reason for flagging (optional):') ?? '';
+  const r = await fetch('/api/clips/' + currentClip.id + '/flag', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({token: myToken, reason})
+  });
+  if (!r.ok) { toast('Flag failed', 'err'); return; }
+  const data = await r.json();
+  currentClip.flags = data.flags;
+  currentClip.flagged = data.flags.length > 0;
+  updateFlagBtn();
+  // Update in allClips too
+  const ac = allClips.find(c => c.id === currentClip.id);
+  if (ac) { ac.flagged = currentClip.flagged; ac.flags = data.flags; }
+  renderClipList();
+  toast(data.action === 'flagged' ? 'Clip flagged for review' : 'Flag removed', 'info');
+}
+
+function updateFlagBtn() {
+  const btn = document.getElementById('flag-btn');
+  if (!btn || !currentClip) return;
+  const myFlag = (currentClip.flags || []).some(f => f.token === myToken);
+  btn.textContent = myFlag ? 'Unflag' : 'Flag for review';
+  btn.style.borderColor = myFlag ? '#c84' : '#444';
+  btn.style.color = myFlag ? '#fc8' : '#ccc';
+}
+
+function isAdmin() {
+  if (!myToken || !reviewers[myToken]) return false;
+  return reviewers[myToken].label && reviewers[myToken].label.startsWith('*');
+}
+
+function updateTrimVisibility() {
+  const btn = document.getElementById('trim-enter-btn');
+  if (btn) btn.style.display = isAdmin() ? '' : 'none';
+}
+
 function enterTrimMode() {
   if (!currentClip) return;
   trimMode = true;
@@ -2288,6 +2342,7 @@ async function applyTrim() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
+        token: myToken,
         segments: trimSegments.map(s => ({start_frame: s.startFrame, end_frame: s.endFrame})),
         delete_original: deleteOriginal,
       }),
@@ -2612,8 +2667,7 @@ def create_app(state: AppState) -> FastAPI:
             if info.get("label") == label:
                 return {"token": token, "label": label}
         token = str(uuid.uuid4()).replace("-", "")
-        from datetime import datetime as _datetime
-        reviewers[token] = {"label": label, "created_at": _datetime.utcnow().isoformat() + "Z"}
+        reviewers[token] = {"label": label, "created_at": datetime.utcnow().isoformat() + "Z"}
         _save_reviewers(clips_dir, reviewers)
         return {"token": token, "label": label}
 
@@ -2644,6 +2698,7 @@ def create_app(state: AppState) -> FastAPI:
             captures = data.get("captures") or []
             annotations = data.get("annotations") or {}
             annotators = list(annotations.keys())
+            flags = data.get("flags") or []
             result.append({
                 "id": stem,
                 "goal": data.get("goal") or stem,
@@ -2654,6 +2709,8 @@ def create_app(state: AppState) -> FastAPI:
                 "n_events": len(events),
                 "n_captures": len(captures),
                 "annotators": annotators,
+                "flagged": len(flags) > 0,
+                "flags": flags,
             })
         return result
 
@@ -2695,6 +2752,8 @@ def create_app(state: AppState) -> FastAPI:
             raise HTTPException(status_code=404, detail="Clip not found")
         d = json.loads(jsn.read_text())
         d["id"] = clip_id
+        if "flags" not in d:
+            d["flags"] = []
         # Flatten per-frame signal array and events list for UI consumption
         frames = d.get("frames") or []
         if frames and "signal" not in d:
@@ -2745,7 +2804,6 @@ def create_app(state: AppState) -> FastAPI:
 
     @app.post("/api/clips/{clip_id}/annotations")
     def api_clip_annotations(clip_id: str, body: dict):
-        from datetime import datetime as _datetime
         clips_dir = state.get_clips_dir()
         if clips_dir is None:
             raise HTTPException(status_code=503, detail="clips_dir not configured")
@@ -2762,7 +2820,7 @@ def create_app(state: AppState) -> FastAPI:
             data["annotations"] = {}
         data["annotations"][token] = {
             "label": label,
-            "saved_at": _datetime.utcnow().isoformat() + "Z",
+            "saved_at": datetime.utcnow().isoformat() + "Z",
             "marks": marks,
         }
         jsn.write_text(json.dumps(data, indent=2))
@@ -2792,12 +2850,42 @@ def create_app(state: AppState) -> FastAPI:
             result_events.append({"time": t, "reviewers": rv})
         return {"reviewers": reviewer_tokens, "events": result_events}
 
+    @app.post("/api/clips/{clip_id}/flag")
+    def api_clip_flag(clip_id: str, body: dict):
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        jsn = clips_dir / (clip_id + ".json")
+        if not jsn.exists():
+            raise HTTPException(status_code=404, detail="Clip not found")
+        data = json.loads(jsn.read_text())
+        flags = data.get("flags") or []
+        token = body.get("token", "")
+        reason = body.get("reason", "").strip()
+        reviewers = _load_reviewers(clips_dir)
+        label = reviewers.get(token, {}).get("label", token[:8])
+        # Toggle: if this token already flagged, remove it
+        old_len = len(flags)
+        flags = [f for f in flags if f.get("token") != token]
+        if len(flags) < old_len:
+            action = "unflagged"
+        else:
+            flags.append({"token": token, "label": label, "reason": reason, "time": datetime.now().isoformat()})
+            action = "flagged"
+        data["flags"] = flags
+        jsn.write_text(json.dumps(data, indent=2))
+        print(f"[review] {label} {action} clip {clip_id}" + (f": {reason}" if reason else ""))
+        return {"ok": True, "action": action, "flags": flags}
+
     @app.post("/api/clips/{clip_id}/trim")
     def api_clip_trim(clip_id: str, body: dict):
         from ball_counter.clips import trim_clip
         clips_dir = state.get_clips_dir()
         if clips_dir is None:
             raise HTTPException(status_code=503, detail="clips_dir not configured")
+        token = body.get("token", "")
+        if not _is_admin(token, clips_dir):
+            raise HTTPException(status_code=403, detail="Admin access required")
         jsn = clips_dir / (clip_id + ".json")
         if not jsn.exists():
             raise HTTPException(status_code=404, detail="Clip not found")
