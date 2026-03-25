@@ -13,6 +13,7 @@ __pycache__/
 # ML training data and models
 data/
 models/
+configs/
 
 # IDE
 .vscode/
