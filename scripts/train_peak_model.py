@@ -265,7 +265,17 @@ def train(
     val_ds = SignalDataset(val_sigs, val_labs, sigma=sigma,
                            signal_norm=train_ds.signal_norm)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+    # Weight clips by mark count so rapid-burst clips dominate training
+    clip_weights = [max(1, m) for m in train_ds.n_marks]  # at least 1 for zero-mark clips
+    sampler = torch.utils.data.WeightedRandomSampler(
+        clip_weights, num_samples=len(train_ds), replacement=True)
+
+    n_burst = sum(1 for m in train_ds.n_marks if m >= 5)
+    n_single = sum(1 for m in train_ds.n_marks if 0 < m < 5)
+    n_zero = sum(1 for m in train_ds.n_marks if m == 0)
+    print(f"  Clip weighting: {n_burst} burst (>=5), {n_single} single/spaced (1-4), {n_zero} zero-mark")
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler,
                               collate_fn=collate_fn, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             collate_fn=collate_fn, num_workers=4, pin_memory=True)
