@@ -283,6 +283,7 @@ def run(args: argparse.Namespace) -> None:
             for goal in proc.goals:
                 state.update_count(goal.name, 0)
                 state.register_buffer(goal.name, goal.buffer)
+                state.register_goal(goal.name, goal)
 
     clips_dir = config_path.parent / "clips"
 

@@ -128,6 +128,9 @@ class GoalProcessor:
         self._last_frame = frame
         x1, y1, x2, y2 = self._crop_bounds
 
+        # Store for overlay drawing
+        self._last_alignment_offset = alignment_offset
+
         # Apply alignment correction to crop bounds
         if alignment_offset is not None:
             dx, dy = int(round(alignment_offset[0])), int(round(alignment_offset[1]))
@@ -183,6 +186,28 @@ class GoalProcessor:
 
         return event
 
+    # Overlay modes: cycle with set_overlay_mode()
+    OVERLAY_NONE = 0
+    OVERLAY_LINE = 1
+    OVERLAY_ROI = 2
+    OVERLAY_CORRECTED = 3  # AprilTag-corrected ROI
+    OVERLAY_ALL = 4
+    _OVERLAY_COUNT = 5
+
+    def set_overlay_mode(self, mode: int | None = None) -> int:
+        """Set or cycle the overlay mode. Returns the new mode."""
+        if not hasattr(self, '_overlay_mode'):
+            self._overlay_mode = self.OVERLAY_LINE
+        if mode is not None:
+            self._overlay_mode = mode % self._OVERLAY_COUNT
+        else:
+            self._overlay_mode = (self._overlay_mode + 1) % self._OVERLAY_COUNT
+        return self._overlay_mode
+
+    @property
+    def overlay_mode(self) -> int:
+        return getattr(self, '_overlay_mode', self.OVERLAY_LINE)
+
     def crop_jpeg(self, quality: int = 75) -> bytes | None:
         """Return the goal window crop with overlay as JPEG bytes."""
         if self._last_frame is None or self.counter is None:
@@ -190,7 +215,39 @@ class GoalProcessor:
 
         x1, y1, x2, y2 = self._crop_bounds
         display = self._last_frame[y1:y2, x1:x2].copy()
-        self.counter.draw(display, color=self.config.draw_color)
+        ds = self.config.downsample
+        mode = self.overlay_mode
+
+        def offset_scale(pts):
+            return [[int((p[0] - x1) * ds), int((p[1] - y1) * ds)] for p in pts]
+
+        # Draw based on overlay mode
+        if mode == self.OVERLAY_LINE or mode == self.OVERLAY_ALL:
+            self.counter.draw(display, color=self.config.draw_color)
+        if mode == self.OVERLAY_ROI or mode == self.OVERLAY_ALL:
+            if self.config.roi_points:
+                roi_local = offset_scale(self.config.roi_points)
+                roi_arr = np.array(roi_local, dtype=np.int32)
+                cv2.polylines(display, [roi_arr], True, (255, 0, 255), 2)
+                cv2.putText(display, "ROI", (roi_arr[0][0], roi_arr[0][1] - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+        if mode == self.OVERLAY_CORRECTED or mode == self.OVERLAY_ALL:
+            offset = getattr(self, '_last_alignment_offset', None)
+            if self.config.roi_points and offset is not None:
+                dx, dy = offset
+                corrected_pts = [[p[0] + dx, p[1] + dy] for p in self.config.roi_points]
+                roi_local = offset_scale(corrected_pts)
+                roi_arr = np.array(roi_local, dtype=np.int32)
+                cv2.polylines(display, [roi_arr], True, (0, 255, 255), 2)
+                cv2.putText(display, "corrected", (roi_arr[0][0], roi_arr[0][1] - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        if mode == self.OVERLAY_NONE:
+            pass  # no overlay
+
+        # Mode label
+        labels = ["off", "line", "roi", "corrected", "all"]
+        cv2.putText(display, labels[mode], (4, 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
 
         if self.score_flash > 0:
             alpha = self.score_flash / 20
@@ -291,7 +348,12 @@ class SourceProcessor:
         # Initialize AprilTag alignment tracker on the full frame
         from ball_counter.apriltag import AlignmentTracker
         self._alignment = AlignmentTracker()
-        self._alignment.update(self._frame)
+        # Gather crop regions to search for markers near goals
+        self._search_regions = []
+        for goal in self.goals:
+            if goal.config.crop_override:
+                self._search_regions.append(tuple(goal.config.crop_override))
+        self._alignment.update(self._frame, search_regions=self._search_regions)
         if self._alignment.initialized:
             print(f"apriltag - {self._alignment.status_str()}")
 
@@ -340,7 +402,7 @@ class SourceProcessor:
         self._frame_count += 1
         if (self._alignment is not None
                 and self._frame_count % self._alignment_interval == 0):
-            self._alignment.update(self._frame)
+            self._alignment.update(self._frame, search_regions=self._search_regions)
             drift = self._alignment.drift_px
             if drift > 2.0:
                 dx, dy = self._alignment.offset

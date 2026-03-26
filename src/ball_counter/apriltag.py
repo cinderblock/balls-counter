@@ -81,12 +81,35 @@ class AlignmentTracker:
         self.offset: tuple[float, float] = (0.0, 0.0)  # simple dx, dy
         self._initialized = False
 
-    def update(self, frame: np.ndarray) -> bool:
+    def update(self, frame: np.ndarray,
+              search_regions: list[tuple[int, int, int, int]] | None = None) -> bool:
         """Detect markers and update alignment.
+
+        search_regions: optional list of (x1, y1, x2, y2) rects to search in
+        addition to the full frame. Helps find small markers near goals.
 
         Returns True if alignment was updated successfully.
         """
+        # Detect on full frame
         tags = detect_apriltags(frame)
+
+        # Also search in expanded regions around goals (markers are small/angled)
+        if search_regions:
+            h, w = frame.shape[:2]
+            for rx1, ry1, rx2, ry2 in search_regions:
+                # Expand by 50% to catch markers near the crop edge
+                margin = max(rx2 - rx1, ry2 - ry1) // 2
+                ex1 = max(0, rx1 - margin)
+                ey1 = max(0, ry1 - margin)
+                ex2 = min(w, rx2 + margin)
+                ey2 = min(h, ry2 + margin)
+                region = frame[ey1:ey2, ex1:ex2]
+                region_tags = detect_apriltags(region)
+                for tid, center in region_tags.items():
+                    if tid not in tags:
+                        # Convert back to full-frame coords
+                        tags[tid] = np.array([center[0] + ex1, center[1] + ey1])
+
         if not tags:
             return False
 

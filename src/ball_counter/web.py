@@ -67,6 +67,15 @@ class AppState:
         self._clips_dir: "Path | None" = None
         # Live capture sessions: goal_name -> session dict
         self._capture_sessions: dict = {}
+        self._goals: dict = {}  # goal_name -> GoalProcessor
+
+    def register_goal(self, name: str, goal) -> None:
+        with self._lock:
+            self._goals[name] = goal
+
+    def find_goal(self, name: str):
+        with self._lock:
+            return self._goals.get(name)
 
     def request_reset(self, name: str) -> None:
         with self._lock:
@@ -418,11 +427,11 @@ async function openFrame(id, direction) {
     canvas.style.transition = 'none';
     canvas.style.transform = 'translateX(' + (direction * 100) + '%)';
     canvas.style.opacity = '0.3';
-    requestAnimationFrame(() => {
-      canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-      canvas.style.transform = 'translateX(0)';
-      canvas.style.opacity = '1';
-    });
+    // Force reflow so the browser commits the offscreen position before transitioning
+    void canvas.offsetHeight;
+    canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
+    canvas.style.transform = 'translateX(0)';
+    canvas.style.opacity = '1';
   }
 
   // Use preloaded image if available
@@ -599,11 +608,10 @@ async function undo() {
     canvas.style.transition = 'none';
     canvas.style.transform = 'translateX(-100%)';
     canvas.style.opacity = '0.3';
-    requestAnimationFrame(() => {
-      canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-      canvas.style.transform = 'translateX(0)';
-      canvas.style.opacity = '1';
-    });
+    void canvas.offsetHeight;
+    canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
+    canvas.style.transform = 'translateX(0)';
+    canvas.style.opacity = '1';
     renderFrameList();
     updateMarkCount();
     preloadNext(prev.id);
@@ -642,12 +650,13 @@ async function save(silent) {
     body: JSON.stringify({marks: savedMarks}),
   });
   if (!silent) {
-    filterFrames();
     document.getElementById('save-btn').textContent = 'Saved ✓';
     setTimeout(() => { document.getElementById('save-btn').textContent = 'Save (S)'; }, 1000);
     if (document.getElementById('auto-next')?.checked) {
       nextUnlabeled();
     }
+    // Rebuild sidebar after navigation so DOM work doesn't delay the slide
+    requestAnimationFrame(() => filterFrames());
   }
 }
 
@@ -2861,6 +2870,7 @@ def create_app(state: AppState) -> FastAPI:
               <div class="clip-row">
                 <button class="clip-btn" id="clip-{name}" onclick="saveClip('{name}')">Save last 60s</button>
                 <button class="capture-btn" id="cap-{name}" onclick="captureScore('{name}')">Capture score</button>
+                <button class="overlay-btn" id="overlay-{name}" onclick="cycleOverlay('{name}')">Overlay</button>
               </div>
             </div>"""
 
@@ -2965,6 +2975,14 @@ def create_app(state: AppState) -> FastAPI:
     function resetGoal(name) {{
       fetch('/api/reset/' + name, {{method: 'POST'}});
     }}
+    async function cycleOverlay(name) {{
+      const r = await fetch('/api/overlay/' + name, {{method: 'POST'}});
+      if (r.ok) {{
+        const d = await r.json();
+        const btn = document.getElementById('overlay-' + name);
+        if (btn) btn.textContent = d.mode_name;
+      }}
+    }}
 
     // Listen for score events
     const es = new EventSource('/api/events');
@@ -2997,6 +3015,15 @@ def create_app(state: AppState) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Stream '{name}' not found")
         state.request_reset(name)
         return {"ok": True}
+
+    @app.post("/api/overlay/{name}")
+    def cycle_overlay(name: str):
+        goal = state.find_goal(name)
+        if goal is None:
+            raise HTTPException(status_code=404, detail=f"Goal '{name}' not found")
+        mode = goal.set_overlay_mode()
+        labels = ["off", "line", "roi", "corrected", "all"]
+        return {"ok": True, "mode": mode, "mode_name": labels[mode]}
 
     @app.post("/api/score/{name}")
     def inject_score(name: str, body: dict | None = None):
