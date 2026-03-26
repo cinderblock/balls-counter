@@ -250,18 +250,34 @@ def detect_yolo(mp4_path: Path, goal_config, yolo_model_path: str,
 
     h, w = first.shape[:2]
     x1, y1 = 0, 0
-    if goal_config.crop_override:
-        x1, y1, x2, y2 = goal_config.crop_override
+    crop = goal_config.crop_override
+    if crop and crop[2] <= w and crop[3] <= h:
+        x1, y1, x2, y2 = crop
         first = first[y1:y2, x1:x2]
+    else:
+        crop = None  # already cropped
 
-    if ds and ds != 1.0:
+    if ds and ds != 1.0 and crop is not None:
         ch, cw = first.shape[:2]
         first = cv2.resize(first, (max(1, int(cw * ds)), max(1, int(ch * ds))))
 
-    def offset_scale(pts):
-        return [[int((p[0] - x1) * ds), int((p[1] - y1) * ds)] for p in pts]
-
-    roi = offset_scale(goal_config.roi_points)
+    if crop is not None:
+        eff_ds = ds
+        def offset_scale(pts):
+            return [[int((p[0] - x1) * eff_ds), int((p[1] - y1) * eff_ds)] for p in pts]
+        roi = offset_scale(goal_config.roi_points)
+    else:
+        # Already cropped+downsampled — offset roi_points by crop origin
+        cx1 = goal_config.crop_override[0] if goal_config.crop_override else 0
+        cy1 = goal_config.crop_override[1] if goal_config.crop_override else 0
+        eff_ds = goal_config.downsample
+        fh, fw = first.shape[:2]
+        # Estimate effective downsample from frame size vs crop size
+        if goal_config.crop_override:
+            crop_w = goal_config.crop_override[2] - goal_config.crop_override[0]
+            eff_ds = fw / crop_w if crop_w > 0 else 1.0
+        roi = [[int((p[0] - cx1) * eff_ds), int((p[1] - cy1) * eff_ds)]
+               for p in goal_config.roi_points]
 
     detector = YOLOBallDetector(
         model_path=yolo_model_path,
@@ -282,9 +298,9 @@ def detect_yolo(mp4_path: Path, goal_config, yolo_model_path: str,
         ret, frame = cap.read()
         if not ret:
             break
-        if goal_config.crop_override:
+        if crop is not None:
             frame = frame[y1:y2, x1:x2]
-        if ds and ds != 1.0:
+        if ds and ds != 1.0 and crop is not None:
             ch, cw = frame.shape[:2]
             frame = cv2.resize(frame, (max(1, int(cw * ds)), max(1, int(ch * ds))))
         ev = detector.process_frame(frame)

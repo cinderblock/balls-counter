@@ -166,6 +166,12 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Path to trained ML peak detector (.pt) — replaces threshold-based counting",
     )
+    parser.add_argument(
+        "--yolo-model",
+        default=None,
+        metavar="PATH",
+        help="Path to YOLO ball detector (.pt) — uses object tracking instead of signal peak detection",
+    )
     return parser.parse_args()
 
 
@@ -183,7 +189,8 @@ def _web_url(host: str, port: int | None, socket: str | None) -> str:
     return f"http://{host}:{port}"
 
 
-def _start_sources(config_path: Path, ml_model_path: str | None = None) -> tuple[list[SourceProcessor], object]:
+def _start_sources(config_path: Path, ml_model_path: str | None = None,
+                    yolo_model_path: str | None = None) -> tuple[list[SourceProcessor], object]:
     configs, pfms = load_configs(config_path)
     sources: list[SourceProcessor] = []
     for config in configs:
@@ -195,12 +202,13 @@ def _start_sources(config_path: Path, ml_model_path: str | None = None) -> tuple
             print(f"source   - {config.source}: no goals ready, skipping")
             continue
         config.goals[:] = ready_goals
-        proc = SourceProcessor(config, ml_model_path=ml_model_path)
+        proc = SourceProcessor(config, ml_model_path=ml_model_path,
+                               yolo_model_path=yolo_model_path)
         if not proc.open():
             print(f"source   - {config.source}: cannot open", file=sys.stderr)
             continue
         goal_names = ", ".join(g.name for g in proc.goals)
-        detector = "ML" if ml_model_path else "threshold"
+        detector = "YOLO" if yolo_model_path else ("ML" if ml_model_path else "threshold")
         print(f"source   - {config.source}: connected ({goal_names}) [{detector}]")
         sources.append(proc)
     return sources, pfms
@@ -248,7 +256,8 @@ def run(args: argparse.Namespace) -> None:
         print(f"config   - not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    sources, pfms_cfg = _start_sources(config_path, ml_model_path=args.model)
+    sources, pfms_cfg = _start_sources(config_path, ml_model_path=args.model,
+                                        yolo_model_path=args.yolo_model)
 
     if not sources:
         print("source   - no sources could be opened", file=sys.stderr)
