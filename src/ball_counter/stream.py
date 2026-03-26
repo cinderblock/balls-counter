@@ -97,10 +97,14 @@ class GoalProcessor:
         if self._yolo_model_path is not None:
             from ball_counter.yolo_detector import YOLOBallDetector
             roi = offset_scale(self.config.roi_points)
+            print(f"yolo     - {self.config.name}: crop={scaled_w}x{scaled_h} "
+                  f"roi={roi} max_track_dist=60")
             self.yolo_detector = YOLOBallDetector(
                 model_path=self._yolo_model_path,
                 roi_points=roi,
                 conf_threshold=0.7,
+                max_track_distance=60.0,
+                min_track_age=1,
             )
             self.yolo_detector.process_frame(crop)
 
@@ -112,12 +116,26 @@ class GoalProcessor:
         if self.yolo_detector is not None:
             self.yolo_detector.reset()
 
-    def process(self, frame: np.ndarray, timestamp: str = "") -> MotionEvent | None:
-        """Run motion counting on the crop region of the given frame."""
+    def process(self, frame: np.ndarray, timestamp: str = "",
+                alignment_offset: tuple[float, float] | None = None) -> MotionEvent | None:
+        """Run motion counting on the crop region of the given frame.
+
+        alignment_offset: (dx, dy) pixel drift from AprilTag tracking.
+        When provided, the crop region is shifted to follow camera drift.
+        """
         if self.counter is None:
             return None
         self._last_frame = frame
         x1, y1, x2, y2 = self._crop_bounds
+
+        # Apply alignment correction to crop bounds
+        if alignment_offset is not None:
+            dx, dy = int(round(alignment_offset[0])), int(round(alignment_offset[1]))
+            h, w = frame.shape[:2]
+            x1 = max(0, min(x1 + dx, w - 1))
+            y1 = max(0, min(y1 + dy, h - 1))
+            x2 = max(x1 + 1, min(x2 + dx, w))
+            y2 = max(y1 + 1, min(y2 + dy, h))
         crop = frame[y1:y2, x1:x2]
         ds = self.config.downsample
         if ds != 1.0:
@@ -224,6 +242,9 @@ class SourceProcessor:
         self._frame: np.ndarray | None = None
         self._total_frames = 0
         self._is_video_file = False
+        self._alignment: "AlignmentTracker | None" = None
+        self._alignment_interval = 30  # frames between alignment updates
+        self._frame_count = 0
 
     @property
     def source(self) -> str:
@@ -267,6 +288,13 @@ class SourceProcessor:
         if not ret:
             return False
 
+        # Initialize AprilTag alignment tracker on the full frame
+        from ball_counter.apriltag import AlignmentTracker
+        self._alignment = AlignmentTracker()
+        self._alignment.update(self._frame)
+        if self._alignment.initialized:
+            print(f"apriltag - {self._alignment.status_str()}")
+
         for goal in self.goals:
             goal.init(self._frame)
         return True
@@ -307,8 +335,20 @@ class SourceProcessor:
         """Process the current frame through all goal counters."""
         if self._frame is None:
             return []
+
+        # Periodic alignment update on the full frame
+        self._frame_count += 1
+        if (self._alignment is not None
+                and self._frame_count % self._alignment_interval == 0):
+            self._alignment.update(self._frame)
+            drift = self._alignment.drift_px
+            if drift > 2.0:
+                dx, dy = self._alignment.offset
+                print(f"apriltag - drift: ({dx:+.1f}, {dy:+.1f})px = {drift:.1f}px")
+
         ts = self.timestamp_str
-        return [(goal, goal.process(self._frame, ts)) for goal in self.goals]
+        offset = self._alignment.offset if (self._alignment and self._alignment.initialized) else None
+        return [(goal, goal.process(self._frame, ts, alignment_offset=offset)) for goal in self.goals]
 
     def release(self) -> None:
         if self.cap is not None:
