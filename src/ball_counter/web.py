@@ -251,6 +251,452 @@ def _is_admin(token: str, clips_dir: Path) -> bool:
     return label.startswith("*")
 
 
+_LABEL_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ball Labeling</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#eee;font-family:system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+header{padding:0.5rem 1rem;background:#1a1a1a;border-bottom:1px solid #333;display:flex;align-items:center;gap:1rem;flex-shrink:0}
+header h1{font-size:1rem;font-weight:600}
+header .stats{font-size:0.8rem;color:#888}
+.main{display:flex;flex:1;overflow:hidden}
+.sidebar{width:250px;background:#1a1a1a;border-right:1px solid #333;display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto}
+.sidebar h3{padding:0.5rem;font-size:0.8rem;color:#888;border-bottom:1px solid #333}
+.frame-list{flex:1;overflow-y:auto}
+.frame-item{padding:0.4rem 0.6rem;cursor:pointer;font-size:0.75rem;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center}
+.frame-item:hover{background:#252525}
+.frame-item.active{background:#2a3a2a;border-left:3px solid #4a4}
+.frame-item .badge{font-size:0.65rem;padding:1px 5px;border-radius:3px}
+.badge-done{background:#2a4a2a;color:#6b6}
+.badge-todo{background:#3a3a2a;color:#886}
+.canvas-wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;overflow:hidden}
+canvas{cursor:none;max-width:100%;max-height:calc(100vh - 120px);image-rendering:pixelated}
+.toolbar{padding:0.5rem 1rem;background:#1a1a1a;border-top:1px solid #333;display:flex;gap:0.8rem;align-items:center;flex-shrink:0}
+.toolbar button{padding:0.3rem 0.8rem;background:#333;color:#eee;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:0.8rem}
+.toolbar button:hover{background:#444}
+.toolbar button.primary{background:#2a5a2a;border-color:#4a4}
+.toolbar button.primary:hover{background:#3a6a3a}
+.toolbar button.danger{background:#5a2a2a;border-color:#a44}
+.toolbar .info{font-size:0.75rem;color:#888;margin-left:auto}
+.toolbar .shortcut{color:#666;font-size:0.7rem}
+.filter-bar{padding:0.4rem;display:flex;gap:0.4rem;border-bottom:1px solid #333}
+.filter-bar select,.filter-bar input{padding:0.2rem 0.4rem;background:#222;color:#eee;border:1px solid #444;border-radius:3px;font-size:0.75rem}
+.filter-bar input{flex:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>Ball Counter
+    <a href="/scores" style="font-size:0.7rem;color:#888;font-weight:normal;vertical-align:middle;margin-left:1rem">Scores</a>
+    <a href="/balls" style="font-size:0.7rem;color:#7bf;font-weight:normal;vertical-align:middle;margin-left:0.5rem">Balls</a>
+  </h1>
+  <span class="stats" id="stats">Loading...</span>
+  <span class="stats">Click center of each visible ball. Skip balls cut off by the edge or hidden behind the goal lip. | Right-click = remove | Ctrl+Z = undo | S = save | &larr;&rarr; = prev/next</span>
+</header>
+<div class="main">
+  <div class="sidebar">
+    <div class="filter-bar">
+      <select id="filter" onchange="filterFrames()">
+        <option value="all">All</option>
+        <option value="todo">Unlabeled</option>
+        <option value="done">Labeled</option>
+      </select>
+      <input type="text" id="search" placeholder="Search..." oninput="filterFrames()">
+    </div>
+    <div class="frame-list" id="frame-list"></div>
+  </div>
+  <div class="canvas-wrap" id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+  </div>
+</div>
+<div class="toolbar">
+  <button class="primary" onclick="save()" id="save-btn">Save (S)</button>
+  <button onclick="clearMarks()">Clear all</button>
+  <button onclick="undo()">Undo (Ctrl+Z)</button>
+  <button onclick="prevFrame()">&larr; Prev</button>
+  <button onclick="nextFrame()">Next &rarr;</button>
+  <button onclick="nextUnlabeled()">Next unlabeled (N)</button>
+  <label style="font-size:0.8rem;cursor:pointer;display:flex;align-items:center;gap:0.3rem">
+    <input type="checkbox" id="auto-next" onchange="localStorage.setItem('label_autonext',this.checked)"> Auto-next
+  </label>
+  <span class="info" id="mark-count">0 balls marked</span>
+</div>
+
+<script>
+let allFrames = [];
+let filteredFrames = [];
+let currentFrame = null;
+let marks = [];  // [{x, y}] in image coordinates
+let undoStack = [];  // within current frame
+let frameHistory = [];  // [{id, marks}] for cross-frame undo
+let img = new Image();
+let preloadImg = null;
+let preloadId = null;
+let dirty = false;
+let scale = 1;
+let offsetX = 0, offsetY = 0;
+let slideDir = 0;  // 1=right, -1=left, 0=none
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const BALL_RADIUS = 16;  // approximate ball radius in image pixels
+let mouseX = -1, mouseY = -1;  // cursor position in image coords
+
+async function init() {
+  const cb = document.getElementById('auto-next');
+  if (cb) cb.checked = localStorage.getItem('label_autonext') === 'true';
+  const r = await fetch('/api/label/frames');
+  allFrames = await r.json();
+  filterFrames();
+  updateStats();
+  if (allFrames.length > 0) {
+    const first = filteredFrames.find(f => !f.labeled) || filteredFrames[0];
+    if (first) openFrame(first.id);
+  }
+}
+
+function updateStats() {
+  const done = allFrames.filter(f => f.labeled).length;
+  document.getElementById('stats').textContent =
+    done + ' / ' + allFrames.length + ' frames labeled';
+}
+
+function filterFrames() {
+  const filter = document.getElementById('filter').value;
+  const search = document.getElementById('search').value.toLowerCase();
+  filteredFrames = allFrames.filter(f => {
+    if (filter === 'todo' && f.labeled) return false;
+    if (filter === 'done' && !f.labeled) return false;
+    if (search && !f.id.toLowerCase().includes(search) && !f.clip.toLowerCase().includes(search)) return false;
+    return true;
+  });
+  renderFrameList();
+}
+
+function renderFrameList() {
+  const list = document.getElementById('frame-list');
+  list.innerHTML = '';
+  for (const f of filteredFrames) {
+    const div = document.createElement('div');
+    div.className = 'frame-item' + (currentFrame && currentFrame.id === f.id ? ' active' : '');
+    div.innerHTML = '<span>' + f.clip.slice(9, 15) + ' f' + f.frame_num + '</span>' +
+      '<span class="badge ' + (f.labeled ? 'badge-done' : 'badge-todo') + '">' +
+      (f.labeled ? f.n_marks + ' balls' : 'todo') + '</span>';
+    div.onclick = () => openFrame(f.id);
+    list.appendChild(div);
+  }
+}
+
+async function openFrame(id, direction) {
+  if (currentFrame) {
+    // Auto-save current frame (silent, non-blocking)
+    if (dirty) await save(true);
+    // Push to frame history for cross-frame undo
+    frameHistory.push({id: currentFrame.id, marks: marks.map(m => [m.x, m.y])});
+    if (frameHistory.length > 50) frameHistory.shift();
+  }
+
+  const f = allFrames.find(x => x.id === id);
+  if (!f) return;
+  currentFrame = f;
+
+  // Load existing marks
+  if (f.labeled && f.marks) {
+    marks = f.marks.map(m => ({x: m[0], y: m[1]}));
+  } else {
+    marks = [];
+  }
+  undoStack = [];
+  dirty = false;
+
+  // Slide animation
+  if (direction) {
+    canvas.style.transition = 'none';
+    canvas.style.transform = 'translateX(' + (direction * 100) + '%)';
+    canvas.style.opacity = '0.3';
+    requestAnimationFrame(() => {
+      canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
+      canvas.style.transform = 'translateX(0)';
+      canvas.style.opacity = '1';
+    });
+  }
+
+  // Use preloaded image if available
+  if (preloadId === id && preloadImg && preloadImg.complete && preloadImg.naturalWidth > 0) {
+    img = preloadImg;
+    preloadImg = null;
+    preloadId = null;
+    fitCanvas();
+    draw();
+  } else {
+    img = new Image();
+    img.onload = () => {
+      fitCanvas();
+      draw();
+    };
+    img.src = '/api/label/frame/' + id + '.jpg?' + Date.now();
+  }
+
+  renderFrameList();
+  updateMarkCount();
+  preloadNext(id);
+
+  // Scroll active item to center of list
+  requestAnimationFrame(() => {
+    const active = document.querySelector('.frame-item.active');
+    if (active) active.scrollIntoView({block: 'center', behavior: 'smooth'});
+  });
+}
+
+function fitCanvas() {
+  const wrap = document.getElementById('canvas-wrap');
+  const maxW = wrap.clientWidth - 20;
+  const maxH = wrap.clientHeight - 20;
+  scale = Math.min(maxW / img.width, maxH / img.height, 4);  // up to 4x zoom for small crops
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  offsetX = 0;
+  offsetY = 0;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  // Draw marks
+  for (let i = 0; i < marks.length; i++) {
+    const m = marks[i];
+    const sx = m.x * scale;
+    const sy = m.y * scale;
+    const r = BALL_RADIUS * scale;
+
+    // Crosshair
+    ctx.strokeStyle = '#0f0';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(sx - r * 1.5, sy);
+    ctx.lineTo(sx + r * 1.5, sy);
+    ctx.moveTo(sx, sy - r * 1.5);
+    ctx.lineTo(sx, sy + r * 1.5);
+    ctx.stroke();
+
+    // Number
+    ctx.fillStyle = '#0f0';
+    ctx.font = (10 * Math.max(1, scale / 2)) + 'px monospace';
+    ctx.fillText('' + (i + 1), sx + r + 2, sy - 2);
+  }
+
+  // Cursor circle (ball diameter preview)
+  if (mouseX >= 0 && mouseY >= 0) {
+    const sx = mouseX * scale;
+    const sy = mouseY * scale;
+    const r = BALL_RADIUS * scale;
+    ctx.strokeStyle = 'rgba(0, 200, 255, 0.7)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Small center dot
+    ctx.fillStyle = 'rgba(0, 200, 255, 0.9)';
+    ctx.beginPath();
+    ctx.arc(sx, sy, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// ── Input handling ──
+
+function canvasToImage(e) {
+  const rect = canvas.getBoundingClientRect();
+  // Map from display pixels to image pixels using actual display size
+  const displayScaleX = canvas.width / rect.width;
+  const displayScaleY = canvas.height / rect.height;
+  const canvasX = (e.clientX - rect.left) * displayScaleX;
+  const canvasY = (e.clientY - rect.top) * displayScaleY;
+  return { x: canvasX / scale, y: canvasY / scale };
+}
+
+canvas.addEventListener('mousemove', (e) => {
+  const {x, y} = canvasToImage(e);
+  mouseX = x;
+  mouseY = y;
+  draw();
+});
+
+canvas.addEventListener('mouseleave', () => {
+  mouseX = -1;
+  mouseY = -1;
+  draw();
+});
+
+canvas.addEventListener('click', (e) => {
+  if (!currentFrame) return;
+  const {x, y} = canvasToImage(e);
+  undoStack.push([...marks.map(m => ({...m}))]);
+  marks.push({x: Math.round(x), y: Math.round(y)});
+  dirty = true;
+  draw();
+  updateMarkCount();
+});
+
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (!currentFrame || marks.length === 0) return;
+  const {x: cx, y: cy} = canvasToImage(e);
+  // Remove nearest mark within 20px
+  let nearest = -1, bestD = 20;
+  for (let i = 0; i < marks.length; i++) {
+    const d = Math.hypot(marks[i].x - cx, marks[i].y - cy);
+    if (d < bestD) { bestD = d; nearest = i; }
+  }
+  if (nearest >= 0) {
+    undoStack.push([...marks.map(m => ({...m}))]);
+    marks.splice(nearest, 1);
+    dirty = true;
+    draw();
+    updateMarkCount();
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 's' && !e.ctrlKey && !e.metaKey) { save(); }
+  if (e.key === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
+  if (e.key === 'ArrowLeft') { prevFrame(); }
+  if (e.key === 'ArrowRight') { nextFrame(); }
+  if (e.key === 'n' || e.key === 'N') { nextUnlabeled(); }
+});
+
+async function undo() {
+  if (undoStack.length > 0) {
+    marks = undoStack.pop();
+    dirty = true;
+    draw();
+    updateMarkCount();
+  } else if (frameHistory.length > 0) {
+    // Cross-frame undo: save current, go back to previous frame
+    if (dirty) await save();
+    const prev = frameHistory.pop();
+    const f = allFrames.find(x => x.id === prev.id);
+    if (!f) return;
+    currentFrame = f;
+    marks = prev.marks.map(m => ({x: m[0], y: m[1]}));
+    undoStack = [];
+    dirty = false;
+    // Load image
+    img = new Image();
+    img.onload = () => { fitCanvas(); draw(); };
+    img.src = '/api/label/frame/' + prev.id + '.jpg?' + Date.now();
+    canvas.style.transition = 'none';
+    canvas.style.transform = 'translateX(-100%)';
+    canvas.style.opacity = '0.3';
+    requestAnimationFrame(() => {
+      canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
+      canvas.style.transform = 'translateX(0)';
+      canvas.style.opacity = '1';
+    });
+    renderFrameList();
+    updateMarkCount();
+    preloadNext(prev.id);
+  }
+}
+
+function clearMarks() {
+  if (marks.length === 0) return;
+  undoStack.push([...marks.map(m => ({...m}))]);
+  marks = [];
+  dirty = true;
+  draw();
+  updateMarkCount();
+}
+
+function updateMarkCount() {
+  document.getElementById('mark-count').textContent = marks.length + ' balls marked';
+}
+
+// ── Save / navigate ──
+
+async function save(silent) {
+  if (!currentFrame) return;
+  const savedFrame = currentFrame;
+  const savedMarks = marks.map(m => [m.x, m.y]);
+  // Update local state immediately
+  savedFrame.labeled = true;
+  savedFrame.n_marks = savedMarks.length;
+  savedFrame.marks = savedMarks;
+  dirty = false;
+  updateStats();
+  // Fire request (don't block navigation)
+  fetch('/api/label/frame/' + savedFrame.id, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({marks: savedMarks}),
+  });
+  if (!silent) {
+    filterFrames();
+    document.getElementById('save-btn').textContent = 'Saved ✓';
+    setTimeout(() => { document.getElementById('save-btn').textContent = 'Save (S)'; }, 1000);
+    if (document.getElementById('auto-next')?.checked) {
+      nextUnlabeled();
+    }
+  }
+}
+
+function preloadNext(currentId) {
+  const idx = filteredFrames.findIndex(f => f.id === currentId);
+  // Preload next unlabeled, or just next
+  let nextId = null;
+  for (let i = idx + 1; i < filteredFrames.length; i++) {
+    if (!filteredFrames[i].labeled) { nextId = filteredFrames[i].id; break; }
+  }
+  if (!nextId && idx + 1 < filteredFrames.length) {
+    nextId = filteredFrames[idx + 1].id;
+  }
+  if (nextId && nextId !== preloadId) {
+    preloadImg = new Image();
+    preloadId = nextId;
+    preloadImg.src = '/api/label/frame/' + nextId + '.jpg?' + Date.now();
+  }
+}
+
+function prevFrame() {
+  if (!currentFrame) return;
+  const idx = filteredFrames.findIndex(f => f.id === currentFrame.id);
+  if (idx > 0) openFrame(filteredFrames[idx - 1].id, -1);
+}
+
+function nextFrame() {
+  if (!currentFrame) return;
+  const idx = filteredFrames.findIndex(f => f.id === currentFrame.id);
+  if (idx < filteredFrames.length - 1) openFrame(filteredFrames[idx + 1].id, 1);
+}
+
+function nextUnlabeled() {
+  const idx = currentFrame ? filteredFrames.findIndex(f => f.id === currentFrame.id) : -1;
+  for (let i = idx + 1; i < filteredFrames.length; i++) {
+    if (!filteredFrames[i].labeled) { openFrame(filteredFrames[i].id, 1); return; }
+  }
+  for (let i = 0; i < idx; i++) {
+    if (!filteredFrames[i].labeled) { openFrame(filteredFrames[i].id, 1); return; }
+  }
+}
+
+init();
+</script>
+</body>
+</html>
+"""
+
+
 _WIZARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2453,7 +2899,11 @@ def create_app(state: AppState) -> FastAPI:
   </style>
 </head>
 <body>
-  <h1>Ball Counter <a href="/" style="font-size:0.7rem;color:#7bf;font-weight:normal;vertical-align:middle;margin-left:1rem">Review</a> <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="font-size:0.6rem;color:#444;font-weight:normal;vertical-align:middle;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a></h1>
+  <h1>Ball Counter
+    <a href="/scores" style="font-size:0.7rem;color:#7bf;font-weight:normal;vertical-align:middle;margin-left:1rem">Scores</a>
+    <a href="/balls" style="font-size:0.7rem;color:#888;font-weight:normal;vertical-align:middle;margin-left:0.5rem">Balls</a>
+    <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="font-size:0.6rem;color:#444;font-weight:normal;vertical-align:middle;margin-left:0.5rem;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a>
+  </h1>
   <div id="goals">{stream_cards}</div>
   <div id="log">
     <h2>Recent scores</h2>
@@ -2641,10 +3091,21 @@ def create_app(state: AppState) -> FastAPI:
             return RedirectResponse("/wizard")
         return HTMLResponse(_REVIEW_HTML)
 
+    @app.get("/scores", response_class=HTMLResponse)
+    def scores_page():
+        if _wizard_active():
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse("/wizard")
+        return HTMLResponse(_REVIEW_HTML)
+
+    @app.get("/balls", response_class=HTMLResponse)
+    def balls_page():
+        return HTMLResponse(_LABEL_HTML)
+
     @app.get("/review", response_class=HTMLResponse)
     def review_redirect():
         from fastapi.responses import RedirectResponse
-        return RedirectResponse("/")
+        return RedirectResponse("/scores")
 
     @app.get("/api/reviewers")
     def api_reviewers():
@@ -2903,6 +3364,191 @@ def create_app(state: AppState) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         return {"ok": True, "new_ids": new_ids}
+
+    # ------------------------------------------------------------------ label
+
+    @app.get("/label", response_class=HTMLResponse)
+    def label_page():
+        return HTMLResponse(_LABEL_HTML)
+
+    def _get_label_dir() -> Path:
+        """Get/create the label data directory."""
+        p = Path("data/labels")
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _get_label_frames_index(clips_dir: Path) -> list[dict]:
+        """Build list of frames to label from annotated clips.
+
+        Extracts key frames near human marks from clips.
+        Returns list of {id, clip, goal, frame_num, labeled, n_marks, marks}.
+        """
+        import cv2
+        label_dir = _get_label_dir()
+        index_path = label_dir / "index.json"
+
+        # Load existing index
+        if index_path.exists():
+            index = json.loads(index_path.read_text())
+        else:
+            index = {"frames": {}}
+
+        # Scan clips for new frames to add
+        needs_save = False
+        for jp in sorted(clips_dir.glob("*.json")):
+            if jp.stem == "reviewers":
+                continue
+            mp4 = jp.with_suffix(".mp4")
+            if not mp4.exists():
+                continue
+            clip = json.loads(jp.read_text())
+            if not clip.get("annotations"):
+                continue
+
+            # Get mark times
+            times = []
+            for ann in clip.get("annotations", {}).values():
+                for m in ann.get("marks", []):
+                    times.append(float(m["video_time"]))
+            times.sort()
+            deduped = []
+            for t in times:
+                if not deduped or t - deduped[-1] > 0.15:
+                    deduped.append(t)
+            if not deduped:
+                # Zero-score clip: add a few frames
+                cap = cv2.VideoCapture(str(mp4))
+                n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap.release()
+                if n > 0:
+                    fps = clip.get("fps", 30.0)
+                    sample_frames = [0, n // 4, n // 2, 3 * n // 4, n - 1]
+                    for fi in sample_frames:
+                        fid = f"{jp.stem}__f{fi:06d}"
+                        if fid not in index["frames"]:
+                            index["frames"][fid] = {
+                                "clip": jp.stem, "goal": clip.get("goal", ""),
+                                "frame_num": fi, "labeled": False,
+                                "n_marks": 0, "marks": [],
+                            }
+                            needs_save = True
+                continue
+
+            # Frames near each mark
+            cap = cv2.VideoCapture(str(mp4))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+
+            for t in deduped:
+                fi = int(t * fps)
+                fi = max(0, min(fi, n_frames - 1))
+                fid = f"{jp.stem}__f{fi:06d}"
+                if fid not in index["frames"]:
+                    index["frames"][fid] = {
+                        "clip": jp.stem, "goal": clip.get("goal", ""),
+                        "frame_num": fi, "labeled": False,
+                        "n_marks": 0, "marks": [],
+                    }
+                    needs_save = True
+
+            # Also add a few negative frames (far from marks)
+            mark_frames = set()
+            for t in deduped:
+                center = int(t * fps)
+                for f in range(max(0, center - int(fps)), min(n_frames, center + int(fps) + 1)):
+                    mark_frames.add(f)
+            candidates = [f for f in range(n_frames) if f not in mark_frames]
+            import random
+            if candidates:
+                neg_count = min(3, len(candidates))
+                for fi in random.sample(candidates, neg_count):
+                    fid = f"{jp.stem}__f{fi:06d}"
+                    if fid not in index["frames"]:
+                        index["frames"][fid] = {
+                            "clip": jp.stem, "goal": clip.get("goal", ""),
+                            "frame_num": fi, "labeled": False,
+                            "n_marks": 0, "marks": [],
+                        }
+                        needs_save = True
+
+        if needs_save:
+            index_path.write_text(json.dumps(index, indent=2))
+
+        # Convert to list
+        result = []
+        for fid, info in sorted(index["frames"].items()):
+            result.append({
+                "id": fid,
+                "clip": info["clip"],
+                "goal": info.get("goal", ""),
+                "frame_num": info["frame_num"],
+                "labeled": info["labeled"],
+                "n_marks": info["n_marks"],
+                "marks": info.get("marks", []),
+            })
+        return result
+
+    @app.get("/api/label/frames")
+    def api_label_frames():
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+        return _get_label_frames_index(clips_dir)
+
+    @app.get("/api/label/frame/{frame_id}.jpg")
+    def api_label_frame_image(frame_id: str):
+        """Serve a specific frame from a clip as JPEG."""
+        import cv2
+        clips_dir = state.get_clips_dir()
+        if clips_dir is None:
+            raise HTTPException(status_code=503, detail="clips_dir not configured")
+
+        # Parse frame_id: clipname__fNNNNNN
+        parts = frame_id.rsplit("__f", 1)
+        if len(parts) != 2:
+            raise HTTPException(status_code=400, detail="Invalid frame ID format")
+        clip_name, frame_str = parts
+        frame_num = int(frame_str)
+
+        mp4 = clips_dir / (clip_name + ".mp4")
+        if not mp4.exists():
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        cap = cv2.VideoCapture(str(mp4))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            raise HTTPException(status_code=404, detail="Frame not found")
+
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            raise HTTPException(status_code=500, detail="Failed to encode frame")
+        return Response(content=bytes(buf), media_type="image/jpeg")
+
+    @app.post("/api/label/frame/{frame_id}")
+    def api_label_frame_save(frame_id: str, body: dict):
+        """Save centroid marks for a frame."""
+        label_dir = _get_label_dir()
+        index_path = label_dir / "index.json"
+        if not index_path.exists():
+            raise HTTPException(status_code=404, detail="No label index")
+
+        index = json.loads(index_path.read_text())
+        if frame_id not in index["frames"]:
+            raise HTTPException(status_code=404, detail="Frame not found in index")
+
+        marks = body.get("marks", [])  # [[x, y], ...]
+        index["frames"][frame_id]["marks"] = marks
+        index["frames"][frame_id]["n_marks"] = len(marks)
+        index["frames"][frame_id]["labeled"] = True
+        index["frames"][frame_id]["labeled_at"] = datetime.now().isoformat()
+
+        index_path.write_text(json.dumps(index, indent=2))
+        print(f"[label] saved {len(marks)} marks for {frame_id}")
+        return {"ok": True, "n_marks": len(marks)}
 
     # ------------------------------------------------------------------ wizard
 

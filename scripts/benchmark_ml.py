@@ -229,6 +229,74 @@ def detect_roi_blob(mp4_path: Path, goal_config, fps_hint: float = 30.0
     return event_times, actual_fps
 
 
+def detect_yolo(mp4_path: Path, goal_config, yolo_model_path: str,
+                fps_hint: float = 30.0, conf: float = 0.3,
+                max_track_distance: float = 40.0,
+                min_track_age: int = 2) -> tuple[list[float], float]:
+    """Run YOLO detector + tracker on a clip. Returns (event_times, fps)."""
+    from ball_counter.yolo_detector import YOLOBallDetector
+
+    cap = cv2.VideoCapture(str(mp4_path))
+    if not cap.isOpened():
+        return [], fps_hint
+
+    actual_fps = cap.get(cv2.CAP_PROP_FPS) or fps_hint
+    ds = goal_config.downsample
+
+    ret, first = cap.read()
+    if not ret:
+        cap.release()
+        return [], actual_fps
+
+    h, w = first.shape[:2]
+    x1, y1 = 0, 0
+    if goal_config.crop_override:
+        x1, y1, x2, y2 = goal_config.crop_override
+        first = first[y1:y2, x1:x2]
+
+    if ds and ds != 1.0:
+        ch, cw = first.shape[:2]
+        first = cv2.resize(first, (max(1, int(cw * ds)), max(1, int(ch * ds))))
+
+    def offset_scale(pts):
+        return [[int((p[0] - x1) * ds), int((p[1] - y1) * ds)] for p in pts]
+
+    roi = offset_scale(goal_config.roi_points)
+
+    detector = YOLOBallDetector(
+        model_path=yolo_model_path,
+        roi_points=roi,
+        conf_threshold=conf,
+        max_track_distance=max_track_distance,
+        min_track_age=min_track_age,
+        device="0",
+    )
+
+    ev = detector.process_frame(first)
+    event_times = []
+    if ev is not None:
+        event_times.append(0.0)
+
+    frame_idx = 1
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if goal_config.crop_override:
+            frame = frame[y1:y2, x1:x2]
+        if ds and ds != 1.0:
+            ch, cw = frame.shape[:2]
+            frame = cv2.resize(frame, (max(1, int(cw * ds)), max(1, int(ch * ds))))
+        ev = detector.process_frame(frame)
+        if ev is not None:
+            for _ in range(ev.n_balls):
+                event_times.append(frame_idx / actual_fps)
+        frame_idx += 1
+
+    cap.release()
+    return event_times, actual_fps
+
+
 def detect_hybrid(signal: np.ndarray, fps: float, goal_config,
                   ml_detector: MLPeakDetector, tolerance: float = 0.5,
                   **threshold_overrides) -> list[float]:
@@ -354,6 +422,8 @@ def main():
     ap.add_argument("--force", action="store_true", help="Re-run all clips, ignoring cache")
     ap.add_argument("--fall-ratio", type=float, default=None)
     ap.add_argument("--cooldown", type=int, default=None)
+    ap.add_argument("--yolo-model", default=None, help="Path to YOLO .pt model")
+    ap.add_argument("--yolo-conf", type=float, default=0.3, help="YOLO confidence threshold")
     args = ap.parse_args()
 
     clips_dir = Path(args.clips_dir)
@@ -462,6 +532,17 @@ def main():
             },
         }
 
+    if args.yolo_model and has_roi:
+        yolo_path = Path(args.yolo_model)
+        if yolo_path.exists():
+            methods["yolo-track"] = {
+                "params": {
+                    "model": str(yolo_path),
+                    "conf": args.yolo_conf,
+                    "geometry": "roi_points (YOLO + centroid tracking)",
+                },
+            }
+
     # Fingerprints for all current clips
     clip_fingerprints = {name: info["fingerprint"] for name, info in all_clips.items()}
 
@@ -511,15 +592,22 @@ def main():
         needs_ml = method_name.startswith("ml") or method_name.startswith("hybrid")
         need_multi = needs_ml and args.model and ml_channels > 1
         needs_roi = method_name.endswith("-roi") or method_name == "roi-blob"
-        needs_video = method_name == "roi-blob"  # needs raw frames, not signal
+        needs_video = method_name in ("roi-blob", "yolo-track")
 
         for clip_name in stale:
             info = all_clips[clip_name]
-            # Skip ROI methods for goals without roi_points
-            if needs_roi and not info["gc"].roi_points:
+            # Skip methods that require roi_points
+            if (needs_roi or method_name == "yolo-track") and not info["gc"].roi_points:
                 continue
 
-            if needs_video:
+            if needs_video and method_name == "yolo-track":
+                if not info["gc"].roi_points:
+                    continue
+                auto, fps = detect_yolo(
+                    info["mp4"], info["gc"], args.yolo_model,
+                    fps_hint=info["clip"].get("fps", 30.0),
+                    conf=args.yolo_conf)
+            elif needs_video:
                 # ROI blob runs directly on video frames
                 auto, fps = detect_roi_blob(
                     info["mp4"], info["gc"], info["clip"].get("fps", 30.0))

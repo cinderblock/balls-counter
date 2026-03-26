@@ -21,4 +21,5 @@ web = [
 ]
 ml = [
     "torch>=2.0",
+    "ultralytics>=8.4.27",
 ]
