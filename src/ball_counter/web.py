@@ -282,6 +282,7 @@ header .stats{font-size:0.8rem;color:#888}
 .frame-item .badge{font-size:0.65rem;padding:1px 5px;border-radius:3px}
 .badge-done{background:#2a4a2a;color:#6b6}
 .badge-todo{background:#3a3a2a;color:#886}
+.badge-auto{background:#2a2a3a;color:#88b;font-style:italic}
 .canvas-wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;overflow:hidden}
 canvas{cursor:none;max-width:100%;max-height:calc(100vh - 120px);image-rendering:pixelated}
 .toolbar{padding:0.5rem 1rem;background:#1a1a1a;border-top:1px solid #333;display:flex;gap:0.8rem;align-items:center;flex-shrink:0}
@@ -313,6 +314,7 @@ canvas{cursor:none;max-width:100%;max-height:calc(100vh - 120px);image-rendering
         <option value="all">All</option>
         <option value="todo">Unlabeled</option>
         <option value="done">Labeled</option>
+        <option value="auto">Auto-neg</option>
       </select>
       <input type="text" id="search" placeholder="Search..." oninput="filterFrames()">
     </div>
@@ -338,7 +340,11 @@ canvas{cursor:none;max-width:100%;max-height:calc(100vh - 120px);image-rendering
 <script>
 let allFrames = [];
 let filteredFrames = [];
+let frameById = new Map();    // id → frame object (O(1) lookup)
+let filteredIdx = new Map();  // id → index in filteredFrames (O(1) position lookup)
 let currentFrame = null;
+let currentFilteredPos = -1;  // index in filteredFrames
+let labeledCount = 0;
 let marks = [];  // [{x, y}] in image coordinates
 let undoStack = [];  // within current frame
 let frameHistory = [];  // [{id, marks}] for cross-frame undo
@@ -355,11 +361,17 @@ const ctx = canvas.getContext('2d');
 const BALL_RADIUS = 16;  // approximate ball radius in image pixels
 let mouseX = -1, mouseY = -1;  // cursor position in image coords
 
+// Frame list DOM nodes, keyed by frame id — reused across renders
+let _frameDivs = new Map();
+let _frameListEl = null;
+
 async function init() {
+  _frameListEl = document.getElementById('frame-list');
   const cb = document.getElementById('auto-next');
   if (cb) cb.checked = localStorage.getItem('label_autonext') === 'true';
   const r = await fetch('/api/label/frames');
   allFrames = await r.json();
+  rebuildFrameById();
   filterFrames();
   updateStats();
   if (allFrames.length > 0) {
@@ -368,10 +380,18 @@ async function init() {
   }
 }
 
+function rebuildFrameById() {
+  frameById.clear();
+  labeledCount = 0;
+  for (const f of allFrames) {
+    frameById.set(f.id, f);
+    if (f.labeled) labeledCount++;
+  }
+}
+
 function updateStats() {
-  const done = allFrames.filter(f => f.labeled).length;
   document.getElementById('stats').textContent =
-    done + ' / ' + allFrames.length + ' frames labeled';
+    labeledCount + ' / ' + allFrames.length + ' frames labeled';
 }
 
 function filterFrames() {
@@ -380,24 +400,51 @@ function filterFrames() {
   filteredFrames = allFrames.filter(f => {
     if (filter === 'todo' && f.labeled) return false;
     if (filter === 'done' && !f.labeled) return false;
+    if (filter === 'auto' && !f.auto_negative) return false;
     if (search && !f.id.toLowerCase().includes(search) && !f.clip.toLowerCase().includes(search)) return false;
     return true;
   });
+  rebuildFilteredIdx();
   renderFrameList();
 }
 
+function rebuildFilteredIdx() {
+  filteredIdx.clear();
+  for (let i = 0; i < filteredFrames.length; i++) {
+    filteredIdx.set(filteredFrames[i].id, i);
+  }
+  // Update currentFilteredPos if we have a current frame
+  if (currentFrame) {
+    currentFilteredPos = filteredIdx.has(currentFrame.id) ? filteredIdx.get(currentFrame.id) : -1;
+  }
+}
+
 function renderFrameList() {
-  const list = document.getElementById('frame-list');
+  const list = _frameListEl;
   list.innerHTML = '';
-  for (const f of filteredFrames) {
+  _frameDivs.clear();
+  // Only render up to 500 items around the current position to avoid DOM bloat
+  const total = filteredFrames.length;
+  let start = 0, end = total;
+  if (total > 500) {
+    const center = currentFilteredPos >= 0 ? currentFilteredPos : 0;
+    start = Math.max(0, center - 250);
+    end = Math.min(total, start + 500);
+  }
+  const frag = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+    const f = filteredFrames[i];
     const div = document.createElement('div');
     div.className = 'frame-item' + (currentFrame && currentFrame.id === f.id ? ' active' : '');
+    const badgeClass = f.auto_negative ? 'badge-auto' : (f.labeled ? 'badge-done' : 'badge-todo');
+    const badgeText = f.auto_negative ? 'auto \u2205' : (f.labeled ? f.n_marks + ' balls' : 'todo');
     div.innerHTML = '<span>' + f.clip.slice(9, 15) + ' f' + f.frame_num + '</span>' +
-      '<span class="badge ' + (f.labeled ? 'badge-done' : 'badge-todo') + '">' +
-      (f.labeled ? f.n_marks + ' balls' : 'todo') + '</span>';
+      '<span class="badge ' + badgeClass + '">' + badgeText + '</span>';
     div.onclick = () => openFrame(f.id);
-    list.appendChild(div);
+    _frameDivs.set(f.id, div);
+    frag.appendChild(div);
   }
+  list.appendChild(frag);
 }
 
 async function openFrame(id, direction) {
@@ -409,9 +456,10 @@ async function openFrame(id, direction) {
     if (frameHistory.length > 50) frameHistory.shift();
   }
 
-  const f = allFrames.find(x => x.id === id);
+  const f = frameById.get(id);
   if (!f) return;
   currentFrame = f;
+  currentFilteredPos = filteredIdx.has(id) ? filteredIdx.get(id) : -1;
 
   // Load existing marks
   if (f.labeled && f.marks) {
@@ -422,43 +470,37 @@ async function openFrame(id, direction) {
   undoStack = [];
   dirty = false;
 
-  // Slide animation
-  if (direction) {
-    canvas.style.transition = 'none';
-    canvas.style.transform = 'translateX(' + (direction * 100) + '%)';
-    canvas.style.opacity = '0.3';
-    // Force reflow so the browser commits the offscreen position before transitioning
-    void canvas.offsetHeight;
-    canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-    canvas.style.transform = 'translateX(0)';
-    canvas.style.opacity = '1';
-  }
-
   // Use preloaded image if available
+  const _t0 = performance.now();
   if (preloadId === id && preloadImg && preloadImg.complete && preloadImg.naturalWidth > 0) {
     img = preloadImg;
     preloadImg = null;
     preloadId = null;
     fitCanvas();
     draw();
+    console.log('[frame] preload HIT, drew in', (performance.now() - _t0).toFixed(1) + 'ms');
   } else {
+    console.log('[frame] preload MISS — wanted', id, 'had', preloadId,
+      'complete?', preloadImg?.complete, 'w?', preloadImg?.naturalWidth);
     img = new Image();
     img.onload = () => {
       fitCanvas();
       draw();
+      console.log('[frame] loaded in', (performance.now() - _t0).toFixed(1) + 'ms');
     };
-    img.src = '/api/label/frame/' + id + '.jpg?' + Date.now();
+    img.src = '/api/label/frame/' + id + '.jpg';
   }
 
-  renderFrameList();
+  // Update active class without rebuilding the whole list
+  const prevActive = _frameListEl.querySelector('.frame-item.active');
+  if (prevActive) prevActive.classList.remove('active');
+  const curDiv = _frameDivs.get(id);
+  if (curDiv) {
+    curDiv.classList.add('active');
+    requestAnimationFrame(() => curDiv.scrollIntoView({block: 'center', behavior: 'smooth'}));
+  }
   updateMarkCount();
   preloadNext(id);
-
-  // Scroll active item to center of list
-  requestAnimationFrame(() => {
-    const active = document.querySelector('.frame-item.active');
-    if (active) active.scrollIntoView({block: 'center', behavior: 'smooth'});
-  });
 }
 
 function fitCanvas() {
@@ -605,13 +647,6 @@ async function undo() {
     img = new Image();
     img.onload = () => { fitCanvas(); draw(); };
     img.src = '/api/label/frame/' + prev.id + '.jpg?' + Date.now();
-    canvas.style.transition = 'none';
-    canvas.style.transform = 'translateX(-100%)';
-    canvas.style.opacity = '0.3';
-    void canvas.offsetHeight;
-    canvas.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-    canvas.style.transform = 'translateX(0)';
-    canvas.style.opacity = '1';
     renderFrameList();
     updateMarkCount();
     preloadNext(prev.id);
@@ -635,14 +670,26 @@ function updateMarkCount() {
 
 async function save(silent) {
   if (!currentFrame) return;
+  if (!silent) console.time('[save] total');
   const savedFrame = currentFrame;
   const savedMarks = marks.map(m => [m.x, m.y]);
   // Update local state immediately
+  if (!savedFrame.labeled) labeledCount++;
   savedFrame.labeled = true;
   savedFrame.n_marks = savedMarks.length;
   savedFrame.marks = savedMarks;
+  delete savedFrame.auto_negative;
   dirty = false;
   updateStats();
+  // Update the sidebar badge for this frame immediately
+  const savedDiv = _frameDivs.get(savedFrame.id);
+  if (savedDiv) {
+    const badge = savedDiv.querySelector('.badge');
+    if (badge) {
+      badge.className = 'badge badge-done';
+      badge.textContent = savedMarks.length + ' balls';
+    }
+  }
   // Fire request (don't block navigation)
   fetch('/api/label/frame/' + savedFrame.id, {
     method: 'POST',
@@ -653,15 +700,16 @@ async function save(silent) {
     document.getElementById('save-btn').textContent = 'Saved ✓';
     setTimeout(() => { document.getElementById('save-btn').textContent = 'Save (S)'; }, 1000);
     if (document.getElementById('auto-next')?.checked) {
+      console.time('[save] nextUnlabeled');
       nextUnlabeled();
+      console.timeEnd('[save] nextUnlabeled');
     }
-    // Rebuild sidebar after navigation so DOM work doesn't delay the slide
-    requestAnimationFrame(() => filterFrames());
+    console.timeEnd('[save] total');
   }
 }
 
 function preloadNext(currentId) {
-  const idx = filteredFrames.findIndex(f => f.id === currentId);
+  const idx = filteredIdx.has(currentId) ? filteredIdx.get(currentId) : -1;
   // Preload next unlabeled, or just next
   let nextId = null;
   for (let i = idx + 1; i < filteredFrames.length; i++) {
@@ -673,24 +721,21 @@ function preloadNext(currentId) {
   if (nextId && nextId !== preloadId) {
     preloadImg = new Image();
     preloadId = nextId;
-    preloadImg.src = '/api/label/frame/' + nextId + '.jpg?' + Date.now();
+    preloadImg.src = '/api/label/frame/' + nextId + '.jpg';
   }
 }
 
 function prevFrame() {
-  if (!currentFrame) return;
-  const idx = filteredFrames.findIndex(f => f.id === currentFrame.id);
-  if (idx > 0) openFrame(filteredFrames[idx - 1].id, -1);
+  if (currentFilteredPos > 0) openFrame(filteredFrames[currentFilteredPos - 1].id, -1);
 }
 
 function nextFrame() {
-  if (!currentFrame) return;
-  const idx = filteredFrames.findIndex(f => f.id === currentFrame.id);
-  if (idx < filteredFrames.length - 1) openFrame(filteredFrames[idx + 1].id, 1);
+  if (currentFilteredPos >= 0 && currentFilteredPos < filteredFrames.length - 1)
+    openFrame(filteredFrames[currentFilteredPos + 1].id, 1);
 }
 
 function nextUnlabeled() {
-  const idx = currentFrame ? filteredFrames.findIndex(f => f.id === currentFrame.id) : -1;
+  const idx = currentFilteredPos;
   for (let i = idx + 1; i < filteredFrames.length; i++) {
     if (!filteredFrames[i].labeled) { openFrame(filteredFrames[i].id, 1); return; }
   }
@@ -2906,6 +2951,7 @@ def create_app(state: AppState) -> FastAPI:
     .capture-btn {{ padding: 0.3rem 1rem; background: #1a3a1a; color: #8f8; border: 1px solid #383; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }}
     .capture-btn:hover {{ background: #2a5a2a; color: #afa; border-color: #5a5; }}
     .capture-btn.flash {{ background: #4a8a2a; color: #fff; border-color: #8f8; }}
+    .overlay-btn {{ padding: 0.3rem 0.5rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.7rem; width: 75px; text-align: center; }}
   </style>
 </head>
 <body>
@@ -3407,11 +3453,14 @@ def create_app(state: AppState) -> FastAPI:
     def _get_label_frames_index(clips_dir: Path) -> list[dict]:
         """Build list of frames to label from annotated clips.
 
-        Extracts key frames near human marks from clips.
+        Extracts key frames near human marks from clips and pre-renders
+        JPEGs to disk so the image endpoint is a simple file serve.
         Returns list of {id, clip, goal, frame_num, labeled, n_marks, marks}.
         """
         import cv2
         label_dir = _get_label_dir()
+        frames_dir = label_dir / "frames"
+        frames_dir.mkdir(exist_ok=True)
         index_path = label_dir / "index.json"
 
         # Load existing index
@@ -3419,6 +3468,13 @@ def create_app(state: AppState) -> FastAPI:
             index = json.loads(index_path.read_text())
         else:
             index = {"frames": {}}
+
+        # Collect new frame IDs per clip so we can batch-extract from each mp4
+        # { clip_stem: [(fid, frame_num), ...] }
+        new_frames_by_clip: dict[str, list[tuple[str, int]]] = {}
+        # Track frames that are candidate negatives (far from marks / zero-score)
+        # so we can auto-label them if no yellow balls are detected
+        auto_neg_candidates: set[str] = set()
 
         # Scan clips for new frames to add
         needs_save = False
@@ -3459,6 +3515,8 @@ def create_app(state: AppState) -> FastAPI:
                                 "n_marks": 0, "marks": [],
                             }
                             needs_save = True
+                            new_frames_by_clip.setdefault(jp.stem, []).append((fid, fi))
+                            auto_neg_candidates.add(fid)
                 continue
 
             # Frames near each mark
@@ -3478,6 +3536,7 @@ def create_app(state: AppState) -> FastAPI:
                         "n_marks": 0, "marks": [],
                     }
                     needs_save = True
+                    new_frames_by_clip.setdefault(jp.stem, []).append((fid, fi))
 
             # Also add a few negative frames (far from marks)
             mark_frames = set()
@@ -3498,6 +3557,69 @@ def create_app(state: AppState) -> FastAPI:
                             "n_marks": 0, "marks": [],
                         }
                         needs_save = True
+                        new_frames_by_clip.setdefault(jp.stem, []).append((fid, fi))
+                        auto_neg_candidates.add(fid)
+
+        # Batch-extract new frames as JPEGs (one VideoCapture open per clip)
+        for clip_stem, frame_list in new_frames_by_clip.items():
+            mp4 = clips_dir / (clip_stem + ".mp4")
+            cap = cv2.VideoCapture(str(mp4))
+            # Sort by frame number for sequential reads
+            for fid, frame_num in sorted(frame_list, key=lambda x: x[1]):
+                out_path = frames_dir / (fid + ".jpg")
+                if out_path.exists():
+                    continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    cv2.imwrite(str(out_path), frame,
+                                [cv2.IMWRITE_JPEG_QUALITY, 90])
+            cap.release()
+
+        # Also ensure JPEGs exist for any older index entries that predate extraction
+        missing_by_clip: dict[str, list[tuple[str, int]]] = {}
+        for fid, info in index["frames"].items():
+            if not (frames_dir / (fid + ".jpg")).exists():
+                missing_by_clip.setdefault(info["clip"], []).append(
+                    (fid, info["frame_num"]))
+        for clip_stem, frame_list in missing_by_clip.items():
+            mp4 = clips_dir / (clip_stem + ".mp4")
+            if not mp4.exists():
+                continue
+            cap = cv2.VideoCapture(str(mp4))
+            for fid, frame_num in sorted(frame_list, key=lambda x: x[1]):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    cv2.imwrite(str(frames_dir / (fid + ".jpg")), frame,
+                                [cv2.IMWRITE_JPEG_QUALITY, 90])
+            cap.release()
+
+        # Auto-label frames with no yellow balls detected.
+        # Runs on new negative candidates AND any existing unlabeled frames.
+        from ball_counter.detector import detect_balls
+        auto_check_fids = set(auto_neg_candidates)
+        for fid, info in index["frames"].items():
+            if not info["labeled"] and not info.get("auto_negative"):
+                auto_check_fids.add(fid)
+        if auto_check_fids:
+            auto_labeled = 0
+            for fid in auto_check_fids:
+                jpg_path = frames_dir / (fid + ".jpg")
+                if not jpg_path.exists():
+                    continue
+                frame = cv2.imread(str(jpg_path))
+                if frame is None:
+                    continue
+                detections = detect_balls(frame)
+                if not detections:
+                    # No yellow balls found — auto-label as empty
+                    index["frames"][fid]["labeled"] = True
+                    index["frames"][fid]["auto_negative"] = True
+                    needs_save = True
+                    auto_labeled += 1
+            if auto_labeled:
+                print(f"[label] auto-labeled {auto_labeled}/{len(auto_check_fids)} frames as empty (no yellow detected)")
 
         if needs_save:
             index_path.write_text(json.dumps(index, indent=2))
@@ -3505,7 +3627,7 @@ def create_app(state: AppState) -> FastAPI:
         # Convert to list
         result = []
         for fid, info in sorted(index["frames"].items()):
-            result.append({
+            entry = {
                 "id": fid,
                 "clip": info["clip"],
                 "goal": info.get("goal", ""),
@@ -3513,7 +3635,10 @@ def create_app(state: AppState) -> FastAPI:
                 "labeled": info["labeled"],
                 "n_marks": info["n_marks"],
                 "marks": info.get("marks", []),
-            })
+            }
+            if info.get("auto_negative"):
+                entry["auto_negative"] = True
+            result.append(entry)
         return result
 
     @app.get("/api/label/frames")
@@ -3525,35 +3650,17 @@ def create_app(state: AppState) -> FastAPI:
 
     @app.get("/api/label/frame/{frame_id}.jpg")
     def api_label_frame_image(frame_id: str):
-        """Serve a specific frame from a clip as JPEG."""
-        import cv2
-        clips_dir = state.get_clips_dir()
-        if clips_dir is None:
-            raise HTTPException(status_code=503, detail="clips_dir not configured")
-
-        # Parse frame_id: clipname__fNNNNNN
-        parts = frame_id.rsplit("__f", 1)
-        if len(parts) != 2:
-            raise HTTPException(status_code=400, detail="Invalid frame ID format")
-        clip_name, frame_str = parts
-        frame_num = int(frame_str)
-
-        mp4 = clips_dir / (clip_name + ".mp4")
-        if not mp4.exists():
-            raise HTTPException(status_code=404, detail="Clip not found")
-
-        cap = cv2.VideoCapture(str(mp4))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-        ret, frame = cap.read()
-        cap.release()
-
-        if not ret or frame is None:
+        """Serve a pre-extracted frame JPEG."""
+        from fastapi.responses import FileResponse
+        label_dir = _get_label_dir()
+        jpg_path = label_dir / "frames" / (frame_id + ".jpg")
+        if not jpg_path.exists():
             raise HTTPException(status_code=404, detail="Frame not found")
-
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        if not ok:
-            raise HTTPException(status_code=500, detail="Failed to encode frame")
-        return Response(content=bytes(buf), media_type="image/jpeg")
+        return FileResponse(
+            jpg_path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
 
     @app.post("/api/label/frame/{frame_id}")
     def api_label_frame_save(frame_id: str, body: dict):
@@ -3572,6 +3679,8 @@ def create_app(state: AppState) -> FastAPI:
         index["frames"][frame_id]["n_marks"] = len(marks)
         index["frames"][frame_id]["labeled"] = True
         index["frames"][frame_id]["labeled_at"] = datetime.now().isoformat()
+        # Clear auto-negative flag if user manually labels this frame
+        index["frames"][frame_id].pop("auto_negative", None)
 
         index_path.write_text(json.dumps(index, indent=2))
         print(f"[label] saved {len(marks)} marks for {frame_id}")

@@ -42,6 +42,9 @@ class GoalConfig:
     downsample: float = 1.0                    # scale factor before MotionCounter (0.25–1.0)
     crop_override: list[int] | None = None     # [x1,y1,x2,y2] user-set crop, overrides auto
 
+    # AprilTag marker IDs associated with this goal (for alignment/auto-calibration)
+    marker_ids: list[int] = field(default_factory=list)
+
     # PFMS integration
     pfms_element: str | None = None            # PFMS element ID; None = skip forwarding
 
@@ -70,6 +73,7 @@ def _parse_goal(entry: dict) -> GoalConfig:
         cooldown=entry.get("cooldown", 0),
         downsample=entry.get("downsample", 1.0),
         crop_override=entry.get("crop_override"),
+        marker_ids=entry.get("marker_ids", []),
         pfms_element=entry.get("pfms_element"),
     )
 
@@ -124,6 +128,8 @@ def save_configs(configs: list[SourceConfig], path: Path,
             d["downsample"] = g.downsample
         if g.crop_override is not None:
             d["crop_override"] = g.crop_override
+        if g.marker_ids:
+            d["marker_ids"] = g.marker_ids
         if g.pfms_element:
             d["pfms_element"] = g.pfms_element
         return d

@@ -128,17 +128,8 @@ class GoalProcessor:
         self._last_frame = frame
         x1, y1, x2, y2 = self._crop_bounds
 
-        # Store for overlay drawing
+        # Store for overlay drawing (don't shift crop — shift geometry instead)
         self._last_alignment_offset = alignment_offset
-
-        # Apply alignment correction to crop bounds
-        if alignment_offset is not None:
-            dx, dy = int(round(alignment_offset[0])), int(round(alignment_offset[1]))
-            h, w = frame.shape[:2]
-            x1 = max(0, min(x1 + dx, w - 1))
-            y1 = max(0, min(y1 + dy, h - 1))
-            x2 = max(x1 + 1, min(x2 + dx, w))
-            y2 = max(y1 + 1, min(y2 + dy, h))
         crop = frame[y1:y2, x1:x2]
         ds = self.config.downsample
         if ds != 1.0:
@@ -214,7 +205,13 @@ class GoalProcessor:
             return None
 
         x1, y1, x2, y2 = self._crop_bounds
-        display = self._last_frame[y1:y2, x1:x2].copy()
+        raw_crop = self._last_frame[y1:y2, x1:x2]
+        # Force consistent output size
+        target_w, target_h = x2 - x1, y2 - y1
+        if raw_crop.shape[1] != target_w or raw_crop.shape[0] != target_h:
+            display = cv2.resize(raw_crop, (target_w, target_h)).copy()
+        else:
+            display = raw_crop.copy()
         ds = self.config.downsample
         mode = self.overlay_mode
 
@@ -346,8 +343,15 @@ class SourceProcessor:
             return False
 
         # Initialize AprilTag alignment tracker on the full frame
-        from ball_counter.apriltag import AlignmentTracker
-        self._alignment = AlignmentTracker()
+        from ball_counter.apriltag import AlignmentTracker, GOAL_MARKER_IDS
+        # Build per-goal marker ID mapping from config or defaults
+        goal_marker_map = {}
+        for goal in self.goals:
+            if goal.config.marker_ids:
+                goal_marker_map[goal.name] = goal.config.marker_ids
+            elif goal.name in GOAL_MARKER_IDS:
+                goal_marker_map[goal.name] = GOAL_MARKER_IDS[goal.name]
+        self._alignment = AlignmentTracker(goal_marker_ids=goal_marker_map)
         # Gather crop regions to search for markers near goals
         self._search_regions = []
         for goal in self.goals:
@@ -409,8 +413,12 @@ class SourceProcessor:
                 print(f"apriltag - drift: ({dx:+.1f}, {dy:+.1f})px = {drift:.1f}px")
 
         ts = self.timestamp_str
-        offset = self._alignment.offset if (self._alignment and self._alignment.initialized) else None
-        return [(goal, goal.process(self._frame, ts, alignment_offset=offset)) for goal in self.goals]
+        results = []
+        for goal in self.goals:
+            offset = (self._alignment.goal_offset(goal.name)
+                      if self._alignment and self._alignment.initialized else None)
+            results.append((goal, goal.process(self._frame, ts, alignment_offset=offset)))
+        return results
 
     def release(self) -> None:
         if self.cap is not None:
