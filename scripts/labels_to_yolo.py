@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("data/yolo_balls"))
     parser.add_argument("--ball-radius", type=int, default=16,
                         help="Radius in image pixels for bounding box generation")
+    parser.add_argument("--edge-margin", type=int, default=8,
+                        help="Skip marks within this many pixels of the frame edge")
     parser.add_argument("--val-split", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -51,6 +53,7 @@ def main():
 
     total_images = 0
     total_boxes = 0
+    skipped_edge = 0
     r = args.ball_radius
 
     # Group frames by clip for efficient video reading
@@ -89,7 +92,12 @@ def main():
 
                 # Convert centroids to YOLO bboxes
                 lines = []
+                m = args.edge_margin
                 for cx, cy in marks:
+                    # Skip marks too close to frame edge (likely partial balls)
+                    if cx < m or cy < m or cx >= img_w - m or cy >= img_h - m:
+                        skipped_edge += 1
+                        continue
                     # Bounding box: square of radius r around centroid
                     bx = max(0, cx - r)
                     by = max(0, cy - r)
@@ -120,7 +128,8 @@ names:
   0: ball
 """)
 
-    print(f"Done: {total_images} images, {total_boxes} bounding boxes")
+    print(f"Done: {total_images} images, {total_boxes} bounding boxes"
+          f" ({skipped_edge} edge marks skipped, margin={args.edge_margin}px)")
     print(f"Dataset: {yaml_path}")
 
 

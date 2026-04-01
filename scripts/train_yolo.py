@@ -51,14 +51,21 @@ def main():
         verbose=True,
     )
 
-    # Copy best weights to models/
-    best = Path("models/yolo") / args.name / "weights" / "best.pt"
+    # Copy best weights to models/ (use actual save dir, not assumed path)
+    import shutil
+    save_dir = Path(results.save_dir) if results else None
+    best = save_dir / "weights" / "best.pt" if save_dir else None
     dest = Path("models") / "yolo_ball_detector.pt"
-    if best.exists():
-        import shutil
+    if best and best.exists():
+        prev = dest.with_suffix(".prev.pt")
+        if dest.exists():
+            shutil.copy2(dest, prev)
+            print(f"Previous model backed up to: {prev}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(best, dest)
-        print(f"\nBest model saved to: {dest}")
+        print(f"Best model saved to: {dest}")
+    else:
+        print(f"WARNING: best.pt not found at {best}")
 
     return results
 
