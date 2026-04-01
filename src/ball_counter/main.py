@@ -342,6 +342,8 @@ def run(args: argparse.Namespace) -> None:
                 for score_name, score_n in state.pop_scores():
                     for goal in proc.goals:
                         if goal.name == score_name:
+                            if goal.yolo_detector is not None:
+                                goal.yolo_detector.total_count += score_n
                             if goal.ml_detector is not None:
                                 goal.ml_detector.count += score_n
                             goal.counter.count += score_n
