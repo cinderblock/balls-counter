@@ -39,15 +39,22 @@ Copy `config.example.json` to `config.json`. Each stream needs:
 ### 3. Run the counter
 
 ```bash
-uv run python -m ball_counter.main config.json
+uv run ball-counter config.json
 ```
 
-All streams display in a 2x2 grid with real-time signal overlay and running counts. Press `q` to quit.
+Options:
 
-```bash
-# Headless mode
-uv run python -m ball_counter.main config.json --no-display
-```
+| Flag | Description |
+|------|-------------|
+| `--web-port PORT_OR_SOCKET` | Enable web UI on a TCP port (e.g. `8080`) or Unix socket path |
+| `--host HOST` | Interface to bind the web server to (default: `0.0.0.0`) |
+| `--trusted-proxies IPS` | Comma-separated IPs (or `*`) to trust for `X-Forwarded-*` headers |
+| `--yolo-model PATH` | YOLO ball detector model — uses object tracking instead of signal peak detection |
+| `--model PATH` | Trained ML peak detector — replaces threshold-based counting |
+| `--wizard` | Launch setup wizard even if config already exists |
+| `--progress-interval N` | Print video-file progress every N frames (default: 300, 0 = off) |
+
+All streams are viewable via the web UI with real-time signal overlay and running counts.
 
 ### 4. Calibrate HSV thresholds (optional)
 
@@ -74,6 +81,28 @@ uv run python scripts/live_field_count.py  # live view
 | `scripts/annotate.py` | Frame-by-frame score annotation for ground truth |
 | `scripts/count_field_zones.py` | Snapshot ball count by field zone |
 | `scripts/live_field_count.py` | Live RTSP field zone counter |
+
+## Running as a systemd service
+
+Install and enable the service:
+
+```bash
+sudo cp balls-counter.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now balls-counter
+```
+
+Edit [balls-counter.env](balls-counter.env) to change settings (config path, web port, YOLO model), then restart:
+
+```bash
+sudo systemctl restart balls-counter
+```
+
+View logs:
+
+```bash
+journalctl -u balls-counter -f
+```
 
 ## Architecture
 
