@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run:*)",
+      "Bash(uv pip:*)",
+      "Bash(uv add:*)",
+      "Bash(python scripts/check_syntax.py:*)",
+      "Bash(pip show:*)",
+      "Bash(git -C:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(ffprobe:*)"
+    ]
+  }
+}
