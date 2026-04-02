@@ -18,7 +18,10 @@ def main():
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
-    model = YOLO("yolov8n.pt")  # nano pretrained on COCO
+    # Base weights cached in .cache/ (gitignored; auto-downloaded by Ultralytics)
+    base_weights = Path(".cache/yolov8n.pt")
+    base_weights.parent.mkdir(exist_ok=True)
+    model = YOLO(str(base_weights))
 
     results = model.train(
         data=str(args.data.resolve()),
