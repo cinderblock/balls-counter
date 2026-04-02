@@ -1,0 +1,27 @@
+[Unit]
+Description=Ball Counter - FIRST Robotics ball scoring vision system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cameron
+WorkingDirectory=/home/cameron/projects/balls-counter
+EnvironmentFile=/home/cameron/projects/balls-counter/balls-counter.env
+ExecStart=/home/cameron/.local/bin/uv run ball-counter ${CONFIG} --web-port ${WEB_PORT} --yolo-model ${YOLO_MODEL}
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=balls-counter
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/cameron/projects/balls-counter
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
