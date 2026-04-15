@@ -3,6 +3,7 @@
 import argparse
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from ball_counter.config import load_configs
@@ -306,9 +307,43 @@ def run(args: argparse.Namespace) -> None:
     progress_last: dict[str, int] = {}
     all_live = all(not s.is_video_file for s in sources)
 
+    all_goals = [goal for proc in sources for goal in proc.goals]
+
     while True:
         frames_read = 0
         file_sources_done = 0
+
+        # Process manual resets and score injections every iteration,
+        # independent of whether frames are available.  This ensures the
+        # web UI stays responsive even when camera streams stall.
+        if state is not None:
+            now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            for name in state.pop_resets():
+                for goal in all_goals:
+                    if goal.name == name:
+                        goal.reset_count()
+                        goal.buffer.clear()
+                        state.update_count(goal.name, 0)
+                        state.emit_reset(goal.name)
+                        print(f"score    - {goal.name}: reset to 0")
+
+            for score_name, score_n in state.pop_scores():
+                for goal in all_goals:
+                    if goal.name == score_name:
+                        if goal.yolo_detector is not None:
+                            goal.yolo_detector.total_count += score_n
+                        if goal.ml_detector is not None:
+                            goal.ml_detector.count += score_n
+                        goal.counter.count += score_n
+                        state.update_count(goal.name, goal.count)
+                        state.emit_event(goal.name, score_n, goal.count, now_str)
+                        print(f"score    - {goal.name}: manual +{score_n} (total: {goal.count})")
+                        if forwarder and goal.config.pfms_element:
+                            alliance = ("red" if "red" in goal.name
+                                        else "blue" if "blue" in goal.name
+                                        else None)
+                            if alliance:
+                                forwarder.send(alliance, goal.config.pfms_element, score_n)
 
         for proc in sources:
             if not proc.read_frame():
@@ -328,34 +363,6 @@ def run(args: argparse.Namespace) -> None:
                     pct = frame_idx / proc.total_frames * 100
                     print(f"progress - {proc.source}: {frame_idx}/{proc.total_frames} ({pct:.1f}%)")
                     progress_last[proc.source] = frame_idx
-
-            if state is not None:
-                for name in state.pop_resets():
-                    for goal in proc.goals:
-                        if goal.name == name:
-                            goal.reset_count()
-                            goal.buffer.clear()
-                            state.update_count(goal.name, 0)
-                            state.emit_reset(goal.name)
-                            print(f"score    - {goal.name}: reset to 0")
-
-                for score_name, score_n in state.pop_scores():
-                    for goal in proc.goals:
-                        if goal.name == score_name:
-                            if goal.yolo_detector is not None:
-                                goal.yolo_detector.total_count += score_n
-                            if goal.ml_detector is not None:
-                                goal.ml_detector.count += score_n
-                            goal.counter.count += score_n
-                            state.update_count(goal.name, goal.count)
-                            state.emit_event(goal.name, score_n, goal.count, ts)
-                            print(f"score    - {goal.name}: manual +{score_n} (total: {goal.count})")
-                            if forwarder and goal.config.pfms_element:
-                                alliance = ("red" if "red" in goal.name
-                                            else "blue" if "blue" in goal.name
-                                            else None)
-                                if alliance:
-                                    forwarder.send(alliance, goal.config.pfms_element, score_n)
 
             for goal, event in results:
                 if state is not None:

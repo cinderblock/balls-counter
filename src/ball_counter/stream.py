@@ -1,6 +1,7 @@
 """Video source and goal processors for motion-based ball counting."""
 
 import os
+import select
 import subprocess
 import threading
 import time
@@ -101,9 +102,16 @@ class CuvidCropReader:
         except FileNotFoundError:
             return False
 
-    def read(self) -> np.ndarray | None:
-        """Read one cropped frame. Returns None on stream drop."""
+    def read(self, timeout: float = 5.0) -> np.ndarray | None:
+        """Read one cropped frame. Returns None on stream drop or timeout."""
         if self._proc is None or self._proc.stdout is None:
+            return None
+        # Wait for data with timeout to avoid blocking forever on stalled streams
+        try:
+            ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+        except (ValueError, OSError):
+            return None
+        if not ready:
             return None
         raw = self._proc.stdout.read(self._frame_bytes)
         if len(raw) != self._frame_bytes:
