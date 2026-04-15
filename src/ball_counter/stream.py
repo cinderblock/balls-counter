@@ -497,10 +497,12 @@ class SourceProcessor:
                 return False
             readers.append(reader)
 
-        # Read the first frame from each to verify the pipeline works
+        # Read the first frame from each to verify the pipeline works.
+        # Use a longer timeout for initial connect — RTSP negotiation +
+        # NVDEC init can take well over 5 seconds.
         first_frames = []
         for i, reader in enumerate(readers):
-            frame = reader.read()
+            frame = reader.read(timeout=30.0)
             if frame is None:
                 print(f"gpu      - {self.goals[i].name}: first read failed, falling back to CPU")
                 for r in readers:
@@ -625,10 +627,10 @@ class SourceProcessor:
                         ok = False
                         break
                 if ok:
-                    # Verify all can read a frame
+                    # Verify all can read a frame (longer timeout for fresh RTSP connect)
                     frames = []
                     for reader in self._gpu_readers:
-                        f = reader.read()
+                        f = reader.read(timeout=30.0)
                         if f is None:
                             ok = False
                             break
