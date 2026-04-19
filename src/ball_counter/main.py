@@ -25,7 +25,7 @@ class AutoRecorder:
         fps: float = 30.0,
         pad_sec: float = 2.0,
         tail_sec: float = 2.0,
-        max_bytes: int = 1_000_000_000,  # 1 GB
+        max_bytes: int = 2_000_000_000,  # 2 GB
     ):
         self._clips_dir = clips_dir
         self._fps = fps
@@ -61,6 +61,10 @@ class AutoRecorder:
     @property
     def full(self) -> bool:
         return self._full
+
+    @property
+    def max_bytes(self) -> int:
+        return self._max_bytes
 
     def on_activity(self, goal_name: str, frame_idx: int, buffer) -> None:
         """Record any signal activity. Coalesces nearby frames into one clip."""
@@ -301,7 +305,7 @@ def run(args: argparse.Namespace) -> None:
         else:
             recorder = AutoRecorder(clips_dir)
             if not recorder.full:
-                print(f"samples  - enabled → {clips_dir} ({clips_size / 1e6:.0f} MB in {n_clips} clips, 1 GB budget, {free_gb:.0f} GB free)")
+                print(f"samples  - enabled → {clips_dir} ({clips_size / 1e6:.0f} MB in {n_clips} clips, {recorder.max_bytes / 1e9:.0f} GB budget, {free_gb:.0f} GB free)")
 
 
     progress_last: dict[str, int] = {}
