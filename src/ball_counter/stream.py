@@ -3,6 +3,7 @@
 import os
 import select
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -425,8 +426,10 @@ class SourceProcessor:
     """Opens one video source and runs all its goal processors on each frame."""
 
     def __init__(self, config: SourceConfig, ml_model_path: str | None = None,
-                 yolo_model_path: str | None = None):
+                 yolo_model_path: str | None = None,
+                 require_gpu: bool = False):
         self.config = config
+        self._require_gpu = require_gpu
         self.goals: list[GoalProcessor] = [
             GoalProcessor(g, ml_model_path=ml_model_path,
                           yolo_model_path=yolo_model_path) for g in config.goals
@@ -537,6 +540,11 @@ class SourceProcessor:
             # AprilTag alignment on crop regions (no full frame needed)
             self._init_alignment_from_crops()
             return True
+
+        if self._require_gpu and source.startswith("rtsp://"):
+            print(f"[{source}] GPU decode failed and --require-gpu is set",
+                  file=sys.stderr)
+            return False
 
         # Fallback: CPU decode via OpenCV
         if source.startswith("rtsp://"):

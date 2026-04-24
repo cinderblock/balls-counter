@@ -8,7 +8,7 @@ Type=simple
 User=cameron
 WorkingDirectory=/home/cameron/projects/balls-counter
 EnvironmentFile=/home/cameron/projects/balls-counter/balls-counter.env
-ExecStart=/home/cameron/.local/bin/uv run ball-counter ${CONFIG} --web-port ${WEB_PORT} --yolo-model ${YOLO_MODEL}
+ExecStart=/home/cameron/.local/bin/uv run ball-counter ${CONFIG} --web-port ${WEB_PORT} --yolo-model ${YOLO_MODEL} --require-gpu
 Restart=on-failure
 RestartSec=5
 

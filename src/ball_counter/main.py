@@ -177,6 +177,11 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Path to YOLO ball detector (.pt) — uses object tracking instead of signal peak detection",
     )
+    parser.add_argument(
+        "--require-gpu",
+        action="store_true",
+        help="Require NVDEC GPU decode for RTSP streams; exit instead of falling back to CPU",
+    )
     return parser.parse_args()
 
 
@@ -195,7 +200,8 @@ def _web_url(host: str, port: int | None, socket: str | None) -> str:
 
 
 def _start_sources(config_path: Path, ml_model_path: str | None = None,
-                    yolo_model_path: str | None = None) -> tuple[list[SourceProcessor], object]:
+                    yolo_model_path: str | None = None,
+                    require_gpu: bool = False) -> tuple[list[SourceProcessor], object]:
     configs, pfms = load_configs(config_path)
     sources: list[SourceProcessor] = []
     for config in configs:
@@ -208,7 +214,8 @@ def _start_sources(config_path: Path, ml_model_path: str | None = None,
             continue
         config.goals[:] = ready_goals
         proc = SourceProcessor(config, ml_model_path=ml_model_path,
-                               yolo_model_path=yolo_model_path)
+                               yolo_model_path=yolo_model_path,
+                               require_gpu=require_gpu)
         if not proc.open():
             print(f"source   - {config.source}: cannot open", file=sys.stderr)
             continue
@@ -262,7 +269,8 @@ def run(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     sources, pfms_cfg = _start_sources(config_path, ml_model_path=args.model,
-                                        yolo_model_path=args.yolo_model)
+                                        yolo_model_path=args.yolo_model,
+                                        require_gpu=args.require_gpu)
 
     if not sources:
         print("source   - no sources could be opened", file=sys.stderr)
@@ -280,7 +288,7 @@ def run(args: argparse.Namespace) -> None:
     if pfms_cfg is not None:
         from ball_counter.pfms import PfmsForwarder
         forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source)
-        print(f"pfms     - enabled → {pfms_cfg.url}")
+        print(f"pfms     - enabled -> {pfms_cfg.url}")
 
     if state is not None:
         state.set_clips_dir(config_path.parent / "clips")
@@ -305,7 +313,7 @@ def run(args: argparse.Namespace) -> None:
         else:
             recorder = AutoRecorder(clips_dir)
             if not recorder.full:
-                print(f"samples  - enabled → {clips_dir} ({clips_size / 1e6:.0f} MB in {n_clips} clips, {recorder.max_bytes / 1e9:.0f} GB budget, {free_gb:.0f} GB free)")
+                print(f"samples  - enabled -> {clips_dir} ({clips_size / 1e6:.0f} MB in {n_clips} clips, {recorder.max_bytes / 1e9:.0f} GB budget, {free_gb:.0f} GB free)")
 
 
     progress_last: dict[str, int] = {}
