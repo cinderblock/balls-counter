@@ -5,6 +5,7 @@ import select
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import cv2
@@ -442,6 +443,13 @@ class SourceProcessor:
         self._gpu_readers: list[CuvidCropReader] | None = None
         self._gpu_crops: list[np.ndarray | None] | None = None
 
+        # Thread pool for parallel per-goal processing (YOLO inference,
+        # motion counting, JPEG encoding all release the GIL).
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(len(config.goals), 1),
+            thread_name_prefix="goal",
+        )
+
     @property
     def source(self) -> str:
         return self.config.source
@@ -602,11 +610,12 @@ class SourceProcessor:
         return self.cap.isOpened()
 
     def read_frame(self) -> bool:
-        # GPU decode path: read from per-goal FFmpeg pipes
+        # GPU decode path: read from per-goal FFmpeg pipes in parallel
         if self._gpu_readers is not None:
+            futures = [self._executor.submit(r.read) for r in self._gpu_readers]
             all_ok = True
-            for i, reader in enumerate(self._gpu_readers):
-                frame = reader.read()
+            for i, fut in enumerate(futures):
+                frame = fut.result()
                 if frame is not None:
                     self._gpu_crops[i] = frame
                 else:
@@ -673,16 +682,18 @@ class SourceProcessor:
         ts = self.timestamp_str
         self._frame_count += 1
 
-        # GPU decode path: each goal already has its own crop
+        # GPU decode path: each goal already has its own crop — process in parallel
         if self._gpu_readers is not None:
-            results = []
-            for i, goal in enumerate(self.goals):
+            def _process_gpu(i: int):
+                goal = self.goals[i]
                 crop = self._gpu_crops[i]
                 if crop is None:
-                    results.append((goal, None))
-                    continue
-                results.append((goal, goal.process(crop, ts, alignment_offset=None)))
-            return results
+                    return (goal, None)
+                return (goal, goal.process(crop, ts, alignment_offset=None))
+
+            futures = [self._executor.submit(_process_gpu, i)
+                       for i in range(len(self.goals))]
+            return [f.result() for f in futures]
 
         # CPU decode path
         if self._frame is None:
@@ -697,14 +708,17 @@ class SourceProcessor:
                 dx, dy = self._alignment.offset
                 print(f"apriltag - drift: ({dx:+.1f}, {dy:+.1f})px = {drift:.1f}px")
 
-        results = []
-        for goal in self.goals:
+        # CPU decode path: process goals in parallel
+        def _process_cpu(goal: GoalProcessor):
             offset = (self._alignment.goal_offset(goal.name)
                       if self._alignment and self._alignment.initialized else None)
-            results.append((goal, goal.process(self._frame, ts, alignment_offset=offset)))
-        return results
+            return (goal, goal.process(self._frame, ts, alignment_offset=offset))
+
+        futures = [self._executor.submit(_process_cpu, g) for g in self.goals]
+        return [f.result() for f in futures]
 
     def release(self) -> None:
+        self._executor.shutdown(wait=False)
         if self._gpu_readers is not None:
             for reader in self._gpu_readers:
                 reader.release()
