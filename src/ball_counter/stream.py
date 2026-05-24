@@ -36,6 +36,8 @@ class CuvidCropReader:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self.last_skipped: int = 0
+        self._total_skipped: int = 0
+        self._last_skip_report: float = 0
 
         if stream_size is None:
             stream_size = self._probe_size()
@@ -141,8 +143,14 @@ class CuvidCropReader:
             raw = next_raw
             skipped += 1
         self.last_skipped = skipped
-        if skipped > 0:
-            print(f"[{self._url}] skipped {skipped} stale frame(s)")
+        self._total_skipped += skipped
+        now = time.monotonic()
+        elapsed = now - self._last_skip_report
+        if elapsed >= 10 and self._total_skipped > 0:
+            rate = self._total_skipped / elapsed
+            print(f"[{self._url}] skipped {self._total_skipped} frame(s) in {elapsed:.0f}s ({rate:.1f}/s)")
+            self._total_skipped = 0
+            self._last_skip_report = now
         return np.frombuffer(raw, dtype=np.uint8).reshape(
             self.crop_h, self.crop_w, 3
         )
