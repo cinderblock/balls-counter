@@ -12,8 +12,6 @@ ExecStart=/home/cameron/.local/bin/uv run ball-counter ${CONFIG} --web-port ${WE
 Restart=on-failure
 RestartSec=5
 Nice=-10
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=50
 
 # Logging
 StandardOutput=journal
