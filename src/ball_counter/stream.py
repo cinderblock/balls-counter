@@ -37,7 +37,7 @@ class CuvidCropReader:
         self._lock = threading.Lock()
         self.last_skipped: int = 0
         self._total_skipped: int = 0
-        self._last_skip_report: float = 0
+        self._last_skip_report: float = time.monotonic()
 
         if stream_size is None:
             stream_size = self._probe_size()
