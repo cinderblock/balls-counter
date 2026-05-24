@@ -35,6 +35,7 @@ class CuvidCropReader:
         self._crop = crop
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
+        self.last_skipped: int = 0
 
         if stream_size is None:
             stream_size = self._probe_size()
@@ -139,6 +140,7 @@ class CuvidCropReader:
                 break
             raw = next_raw
             skipped += 1
+        self.last_skipped = skipped
         if skipped > 0:
             print(f"[{self._url}] skipped {skipped} stale frame(s)")
         return np.frombuffer(raw, dtype=np.uint8).reshape(
@@ -469,12 +471,22 @@ class SourceProcessor:
         self._gpu_readers: list[CuvidCropReader] | None = None
         self._gpu_crops: list[np.ndarray | None] | None = None
 
+        # Per-goal dropped-frame history for the web UI histogram.
+        # Each list holds the last N skip counts (one per read_frame call).
+        self._skip_history: dict[str, list[int]] = {
+            g.name: [] for g in self.goals
+        }
+        self._skip_history_max = 300  # ~10 seconds at 30fps
+
         # Thread pool for parallel per-goal processing (YOLO inference,
         # motion counting, JPEG encoding all release the GIL).
         self._executor = ThreadPoolExecutor(
             max_workers=max(len(config.goals), 1),
             thread_name_prefix="goal",
         )
+
+    def get_skip_history(self, goal_name: str) -> list[int]:
+        return list(self._skip_history.get(goal_name, []))
 
     @property
     def source(self) -> str:
@@ -652,6 +664,11 @@ class SourceProcessor:
                 else:
                     all_ok = False
             if all_ok:
+                for i, reader in enumerate(self._gpu_readers):
+                    hist = self._skip_history[self.goals[i].name]
+                    hist.append(reader.last_skipped)
+                    if len(hist) > self._skip_history_max:
+                        del hist[:-self._skip_history_max]
                 return True
 
             # At least one reader failed — reconnect all

@@ -68,6 +68,7 @@ class AppState:
         # Live capture sessions: goal_name -> session dict
         self._capture_sessions: dict = {}
         self._goals: dict = {}  # goal_name -> GoalProcessor
+        self._skip_histories: dict[str, list[int]] = {}
 
     def register_goal(self, name: str, goal) -> None:
         with self._lock:
@@ -129,6 +130,14 @@ class AppState:
     def get_counts(self) -> dict[str, int]:
         with self._lock:
             return dict(self._counts)
+
+    def update_skip_history(self, name: str, history: list[int]) -> None:
+        with self._lock:
+            self._skip_histories[name] = history
+
+    def get_skip_histories(self) -> dict[str, list[int]]:
+        with self._lock:
+            return dict(self._skip_histories)
 
     def get_frame(self, name: str) -> bytes | None:
         with self._lock:
@@ -838,6 +847,9 @@ button.primary:hover{background:#1e5a94}
     <button class="tool-btn active" id="tool-draw" onclick="setBoxTool('draw')">Draw Box</button>
     <button class="tool-btn" id="tool-edit" onclick="setBoxTool('edit')">Edit</button>
     <button class="tool-btn" id="tool-delete" onclick="setBoxTool('delete')">Delete</button>
+    <label style="margin-left:1rem;font-size:0.8rem;color:#aaa;display:flex;align-items:center;gap:4px;cursor:pointer" title="Force all crop windows to the same pixel dimensions">
+      <input type="checkbox" id="lock-size" onchange="toggleLockSize(this.checked)"/> Lock Size
+    </label>
     <span style="margin-left:auto;font-size:0.8rem;color:#aaa" id="canvas-hint">Click &amp; drag to draw a crop window</span>
   </div>
   <div id="canvas-wrap"><canvas id="canvas"></canvas></div>
@@ -909,6 +921,7 @@ let boxDrag = null;   // {type:'draw'|'resize'|'move', ...}
 let boxTool = 'draw';
 let boxColor = 'red';
 let nextBoxId = 0;
+let lockSize = false; // when true, all crop windows are forced to same pixel size
 const HANDLE_HIT = 14;  // px hit radius (larger than rendered)
 const HANDLE_R   = 7;   // px rendered radius
 const MIN_BOX    = 40;  // min canvas-coord box dimension
@@ -1075,6 +1088,7 @@ function onBoxMove(e) {
     boxDrag.x1 = mx; boxDrag.y1 = my; redrawBoxCanvas(boxDrag);
   } else if (boxDrag.type === 'resize') {
     applyBoxHandle(boxes[boxDrag.bi], boxDrag.hi, mx, my, cw, ch);
+    syncLockedSizes(boxes[boxDrag.bi]);
     redrawBoxCanvas(); updateRamEst();
   } else if (boxDrag.type === 'move') {
     const b = boxes[boxDrag.bi];
@@ -1087,15 +1101,24 @@ function onBoxMove(e) {
 function onBoxUp(e) {
   if (!boxDrag) return;
   if (boxDrag.type === 'draw') {
-    const x = Math.min(boxDrag.x0,boxDrag.x1), y = Math.min(boxDrag.y0,boxDrag.y1);
-    const w = Math.abs(boxDrag.x1-boxDrag.x0), h = Math.abs(boxDrag.y1-boxDrag.y0);
+    let x = Math.min(boxDrag.x0,boxDrag.x1), y = Math.min(boxDrag.y0,boxDrag.y1);
+    let w = Math.abs(boxDrag.x1-boxDrag.x0), h = Math.abs(boxDrag.y1-boxDrag.y0);
     if (w > MIN_BOX && h > MIN_BOX) {
       if (boxes.length >= 2) {
         showMsg('draw-msgs','warn','Max 2 crop windows per stream. Delete one before adding another.');
       } else {
-        boxes.push({id:nextBoxId++, color:boxColor, cx:x, cy:y, cw:w, ch:h,
+        // If lock-size is on and there's already a box, match its dimensions
+        if (lockSize && boxes.length > 0) {
+          const ref = boxes[0];
+          const midX = x + w / 2, midY = y + h / 2;
+          w = ref.cw; h = ref.ch;
+          x = midX - w / 2; y = midY - h / 2;
+        }
+        const newBox = {id:nextBoxId++, color:boxColor, cx:x, cy:y, cw:w, ch:h,
           name:boxColor+'-goal', mode:'outlet', ball_area:1500, band_width:10,
-          fall_ratio:0.7, min_peak:0, cooldown:0, downsample:1.0});
+          fall_ratio:0.7, min_peak:0, cooldown:0, downsample:1.0};
+        clampBox(newBox);
+        boxes.push(newBox);
         // Auto-switch color for second box
         if (boxes.length === 1) setBoxColor(boxColor === 'red' ? 'blue' : 'red');
         redrawBoxCanvas(); updateRamEst();
@@ -1172,13 +1195,47 @@ function setBoxColor(c) {
   document.getElementById('color-blue').classList.toggle('active', c==='blue');
 }
 
+function toggleLockSize(on) {
+  lockSize = on;
+  if (on && boxes.length >= 2) {
+    // Snap all boxes to match the first box's dimensions (centered)
+    const ref = boxes[0];
+    for (let i = 1; i < boxes.length; i++) {
+      const b = boxes[i];
+      const midX = b.cx + b.cw / 2, midY = b.cy + b.ch / 2;
+      b.cw = ref.cw; b.ch = ref.ch;
+      b.cx = midX - b.cw / 2; b.cy = midY - b.ch / 2;
+      clampBox(b);
+    }
+    redrawBoxCanvas(); updateRamEst();
+  }
+}
+
+function clampBox(b) {
+  const c = document.getElementById('canvas');
+  b.cx = Math.max(0, Math.min(b.cx, c.width - b.cw));
+  b.cy = Math.max(0, Math.min(b.cy, c.height - b.ch));
+}
+
+function syncLockedSizes(changedBox) {
+  // After resizing changedBox, make all other boxes match its size (centered)
+  if (!lockSize) return;
+  for (const b of boxes) {
+    if (b === changedBox) continue;
+    const midX = b.cx + b.cw / 2, midY = b.cy + b.ch / 2;
+    b.cw = changedBox.cw; b.ch = changedBox.ch;
+    b.cx = midX - b.cw / 2; b.cy = midY - b.ch / 2;
+    clampBox(b);
+  }
+}
+
 function updateRamEst() {
   const sc = state.frameScale;
   let total = 0;
   for (const b of boxes) {
     const fw = Math.round(b.cw/sc) * (b.downsample||1.0);
     const fh = Math.round(b.ch/sc) * (b.downsample||1.0);
-    total += fw * fh * 0.00002 * 1800;
+    total += fw * fh * 0.0000002 * 1800;
   }
   for (const s of state.streams) for (const g of s.goals)
     total += g.crop.w * g.crop.h * (g.downsample||1.0) * (g.downsample||1.0) * 0.00002 * 1800;
@@ -2919,6 +2976,11 @@ def create_app(state: AppState) -> FastAPI:
               </div>
             </div>"""
 
+        goal_colors_js = ", ".join(
+            f"'{n}': '{'rgba(255,80,80,0.8)' if 'red' in n else 'rgba(80,140,255,0.8)' if 'blue' in n else 'rgba(180,180,180,0.8)'}'"
+            for n in streams
+        )
+
         return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2943,6 +3005,9 @@ def create_app(state: AppState) -> FastAPI:
     #events li {{ padding: 0.3rem 0.5rem; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; color: #ccc; }}
     #events li span.flash {{ color: #0f0; font-weight: bold; }}
     #status {{ text-align: center; font-size: 0.75rem; color: #444; margin-top: 1rem; }}
+    #skip-chart {{ margin-top: 1.5rem; max-width: 600px; margin-left: auto; margin-right: auto; }}
+    #skip-chart h2 {{ font-size: 0.9rem; color: #666; margin-bottom: 0.5rem; }}
+    #skip-chart canvas {{ width: 100%; height: 80px; background: #1a1a1a; border-radius: 4px; }}
     .clear-btn {{ padding: 0.2rem 0.6rem; background: #222; color: #666; border: 1px solid #444; border-radius: 3px; cursor: pointer; font-size: 0.7rem; }}
     .clear-btn:hover {{ background: #500; color: #fff; border-color: #a00; }}
     .clip-btn {{ padding: 0.3rem 1rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }}
@@ -2964,6 +3029,10 @@ def create_app(state: AppState) -> FastAPI:
   <div id="log">
     <h2>Recent scores</h2>
     <ul id="events"></ul>
+  </div>
+  <div id="skip-chart">
+    <h2>Dropped frames <span id="skip-summary" style="color:#555;font-weight:normal"></span></h2>
+    <canvas id="skip-canvas" height="80"></canvas>
   </div>
   <div id="status">connecting...</div>
   <script>
@@ -3046,13 +3115,65 @@ def create_app(state: AppState) -> FastAPI:
         if (evtList.children.length > 50) evtList.lastChild.remove();
       }}
     }};
+
+    // Dropped-frame histogram
+    const skipCanvas = document.getElementById('skip-canvas');
+    const skipCtx = skipCanvas.getContext('2d');
+    const skipSummary = document.getElementById('skip-summary');
+    const goalColors = {{{goal_colors_js}}};
+
+    function drawSkipHistogram(data) {{
+      const canvas = skipCanvas;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      const ctx = skipCtx;
+      ctx.scale(dpr, dpr);
+      const w = rect.width, h = rect.height;
+      ctx.clearRect(0, 0, w, h);
+
+      const names = Object.keys(data);
+      if (names.length === 0) return;
+      const maxLen = Math.max(...names.map(n => data[n].length), 1);
+      const maxVal = Math.max(...names.flatMap(n => data[n]), 1);
+      const barW = Math.max(1, w / maxLen);
+      let totalSkipped = 0;
+
+      for (const name of names) {{
+        const vals = data[name];
+        ctx.fillStyle = goalColors[name] || 'rgba(180,180,180,0.8)';
+        for (let i = 0; i < vals.length; i++) {{
+          if (vals[i] === 0) continue;
+          totalSkipped += vals[i];
+          const barH = (vals[i] / maxVal) * (h - 2);
+          const x = (i / maxLen) * w;
+          ctx.fillRect(x, h - barH, Math.max(barW - 0.5, 1), barH);
+        }}
+      }}
+
+      skipSummary.textContent = totalSkipped > 0
+        ? `(${{totalSkipped}} in last ${{maxLen}} reads)`
+        : '(none)';
+    }}
+
+    function pollSkipHistory() {{
+      fetch('/api/status').then(r => r.json()).then(d => {{
+        if (d.skipped_frames) drawSkipHistogram(d.skipped_frames);
+      }}).catch(() => {{}});
+    }}
+    pollSkipHistory();
+    setInterval(pollSkipHistory, 2000);
   </script>
 </body>
 </html>""")
 
     @app.get("/api/status")
     def status():
-        return {"streams": state.get_counts()}
+        return {
+            "streams": state.get_counts(),
+            "skipped_frames": state.get_skip_histories(),
+        }
 
     @app.post("/api/reset/{name}")
     def reset(name: str):

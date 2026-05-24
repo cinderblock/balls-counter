@@ -364,6 +364,11 @@ def run(args: argparse.Namespace) -> None:
                 continue
             frames_read += 1
 
+            if state is not None:
+                for goal in proc.goals:
+                    state.update_skip_history(
+                        goal.name, proc.get_skip_history(goal.name))
+
             ts = proc.timestamp_str
             results = proc.process_frame()
 
