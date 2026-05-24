@@ -105,10 +105,16 @@ class CuvidCropReader:
             return False
 
     def read(self, timeout: float = 5.0) -> np.ndarray | None:
-        """Read one cropped frame. Returns None on stream drop or timeout."""
+        """Read the most recent frame, discarding any stale ones in the pipe.
+
+        If processing falls behind the stream frame rate, raw frames
+        accumulate in the pipe buffer.  Reading them in order would cause
+        ever-growing latency.  Instead, drain all available data and return
+        only the last complete frame.
+        """
         if self._proc is None or self._proc.stdout is None:
             return None
-        # Wait for data with timeout to avoid blocking forever on stalled streams
+        # Wait for at least one frame to arrive
         try:
             ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
         except (ValueError, OSError):
@@ -118,6 +124,23 @@ class CuvidCropReader:
         raw = self._proc.stdout.read(self._frame_bytes)
         if len(raw) != self._frame_bytes:
             return None
+        # Drain any additional buffered frames so we always process the
+        # freshest one.  Use a zero timeout so we never block here.
+        skipped = 0
+        while True:
+            try:
+                more, _, _ = select.select([self._proc.stdout], [], [], 0)
+            except (ValueError, OSError):
+                break
+            if not more:
+                break
+            next_raw = self._proc.stdout.read(self._frame_bytes)
+            if len(next_raw) != self._frame_bytes:
+                break
+            raw = next_raw
+            skipped += 1
+        if skipped > 0:
+            print(f"[{self._url}] skipped {skipped} stale frame(s)")
         return np.frombuffer(raw, dtype=np.uint8).reshape(
             self.crop_h, self.crop_w, 3
         )
