@@ -50,9 +50,13 @@ class YOLOBallDetector:
         min_track_age: int = 1,
         device: str = "0",
         entry_zone_radius: float = 30.0,
+        imgsz: int = 320,
+        half: bool = True,
     ):
         from ultralytics import YOLO
         self.model = YOLO(str(model_path))
+        self._imgsz = imgsz
+        self._half = half
         self.device = device
         self.conf_threshold = conf_threshold
         self.max_track_distance = max_track_distance
@@ -87,7 +91,7 @@ class YOLOBallDetector:
     def _detect(self, frame: np.ndarray) -> list[tuple[float, float, tuple[int, int, int, int], float]]:
         """Run YOLO on frame, return list of (cx, cy, (x1,y1,x2,y2), conf)."""
         results = self.model.predict(frame, conf=self.conf_threshold, device=self.device,
-                                      verbose=False, imgsz=320)
+                                      verbose=False, imgsz=self._imgsz, half=self._half)
         detections = []
         for r in results:
             if r.boxes is None:
