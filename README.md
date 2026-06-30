@@ -84,24 +84,30 @@ uv run python scripts/live_field_count.py  # live view
 
 ## Running as a systemd service
 
+Runs as a **user** service (no root needed). Requires `ffmpeg` on the host for
+GPU (NVDEC) decode — install it with your package manager (e.g. `sudo apt install ffmpeg`).
+
 Install and enable the service:
 
 ```bash
-sudo cp balls-counter.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now balls-counter
+mkdir -p ~/.config/systemd/user
+cp balls-counter.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now balls-counter
+# run at boot without an active login session:
+sudo loginctl enable-linger "$USER"
 ```
 
 Edit [balls-counter.env](balls-counter.env) to change settings (config path, web port, YOLO model), then restart:
 
 ```bash
-sudo systemctl restart balls-counter
+systemctl --user restart balls-counter
 ```
 
 View logs:
 
 ```bash
-journalctl -u balls-counter -f
+journalctl --user -u balls-counter -f
 ```
 
 ## Architecture
