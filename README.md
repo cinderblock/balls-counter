@@ -62,6 +62,39 @@ All streams are viewable via the web UI with real-time signal overlay and runnin
 uv run python -m ball_counter.calibrate path/to/video.mp4
 ```
 
+### Match recording & review (pFMS)
+
+When the config has a `pfms_url`, the counter follows the pFMS match state
+over its public WebSocket (`/ws/scores`) and records **every goal for the
+whole match** — countdown pre-roll, auto, pauses, teleop, endgame, and the
+post-match ball-count period. The phase timeline (including operator
+pauses) is stored with each recording, so reviewers can see exactly which
+video spans count toward the score.
+
+- `/matches` lists match recordings (a running match shows as LIVE)
+- `/match/<id>` is the per-match review page: pick the red or blue goal
+  (two reviewers can work in parallel), watch the cropped goal video with
+  the match periods shaded on the timeline, and mark each scored ball —
+  live during the match or after the fact. Marks during countdown or an
+  operator pause are automatically excluded from the tally.
+- **Submit final score to PFMS** reports the reviewed score (with the auto
+  portion split out) back to pFMS match history via `POST /api/match-review`
+  using the same `pfms_url`/`pfms_key` as live score forwarding.
+
+Config keys:
+
+```jsonc
+{
+  "pfms_url": "http://pfms.tsl",       // pFMS base URL
+  "pfms_key": "…",                     // API key (optional)
+  "public_url": "http://sentinel:8080" // this service's own URL — lets pFMS
+                                       // link its match history to /match/<id>
+}
+```
+
+Recordings are saved under `<config dir>/clips/matches/` as one MP4 + JSON
+sidecar per goal plus a `<match id>.match.json` metadata file.
+
 ### Field zone counter
 
 Count total balls in 3 field zones (red/middle/blue) from a stitched overhead RTSP stream:
@@ -118,6 +151,11 @@ src/ball_counter/
   counter.py    - MotionCounter (line band + ROI ring modes)
   config.py     - Per-stream JSON configuration
   stream.py     - StreamProcessor (wraps MotionCounter + video capture)
+  buffer.py     - Rolling per-goal frame buffer (feeds clips + recordings)
+  clips.py      - Clip saving/trimming (MP4 + JSON sidecar)
+  match.py      - pFMS match-scoped recording + review score report-back
+  pfms.py       - Live score forwarding to pFMS
+  web.py        - HTTP API + web UIs (live, clips review, match review, wizard)
   main.py       - Multi-stream runner with tiled display
   calibrate.py  - Interactive HSV calibration
 ```

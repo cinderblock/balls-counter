@@ -290,15 +290,28 @@ def run(args: argparse.Namespace) -> None:
         forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source)
         print(f"pfms     - enabled -> {pfms_cfg.url}")
 
+    clips_dir = config_path.parent / "clips"
+
+    # Match-scoped recording: follow PFMS match state and record every goal
+    # for the whole match, for human score review afterwards.
+    match_recorder = None
+    match_link = None
+    if pfms_cfg is not None:
+        from ball_counter.match import MatchRecorder, PfmsMatchLink
+        match_recorder = MatchRecorder(clips_dir / "matches")
+        match_link = PfmsMatchLink(pfms_cfg, match_recorder)
+        match_link.start()
+        print(f"match    - match recording armed (following {pfms_cfg.url})")
+
     if state is not None:
-        state.set_clips_dir(config_path.parent / "clips")
+        state.set_clips_dir(clips_dir)
+        if match_recorder is not None:
+            state.set_match_context(clips_dir / "matches", match_recorder, match_link)
         for proc in sources:
             for goal in proc.goals:
                 state.update_count(goal.name, 0)
                 state.register_buffer(goal.name, goal.buffer)
                 state.register_goal(goal.name, goal)
-
-    clips_dir = config_path.parent / "clips"
 
     # Auto-record short clips around detected events (live sources only)
     recorder = None
@@ -387,6 +400,12 @@ def run(args: argparse.Namespace) -> None:
                     jpeg = goal.crop_jpeg()
                     if jpeg is not None:
                         state.update_frame(goal.name, jpeg)
+
+                # Feed the match recorder every frame while a match is running
+                if match_recorder is not None and match_recorder.active:
+                    bf = goal.buffer.latest()
+                    if bf is not None:
+                        match_recorder.on_frame(goal.name, bf)
 
                 if event:
                     print(f"score    - {goal.name}: +{event.n_balls} at {ts} (total: {goal.count})")
