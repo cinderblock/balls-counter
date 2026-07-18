@@ -3306,7 +3306,7 @@ _MATCH_HTML = """<!DOCTYPE html>
       if (!video) return;
       const t = video.currentTime;
       // Repeated presses at (nearly) the same moment mean multiple balls
-      const near = marks.find(m => Math.abs(m.video_time - t) < 0.75);
+      const near = marks.find(m => Math.abs(m.video_time - t) < 0.4);
       if (near) near.n_balls = (near.n_balls || 1) + 1;
       else marks.push({video_time: t, frame_idx: Math.round(t * (data.goals[goalName].fps || 30)),
                        timestamp: new Date().toISOString(), n_balls: 1});
