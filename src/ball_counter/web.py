@@ -3048,7 +3048,19 @@ _MATCH_HTML = """<!DOCTYPE html>
                 border-radius: 8px; cursor: pointer; font-weight: bold; }
     #mark-btn:active { background: #4a8a2a; color: #fff; }
     #undo-btn { padding: 0.5rem 1rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 6px; cursor: pointer; }
+    #autospeed-btn, .speed-btn { padding: 0.4rem 0.7rem; background: #333; color: #aaa; border: 1px solid #555;
+                                 border-radius: 5px; cursor: pointer; font-size: 0.8rem; }
+    #autospeed-btn.on { background: #14305a; color: #bdf; border-color: #47a; }
+    .speed-btn.active { background: #555; color: #fff; }
     .hint { color: #666; font-size: 0.75rem; }
+    #agreement h2 { font-size: 0.85rem; color: #888; margin-top: 1rem; margin-bottom: 0.3rem; }
+    #agreement table { border-collapse: collapse; font-size: 0.85rem; }
+    #agreement th, #agreement td { padding: 0.25rem 0.8rem; border-bottom: 1px solid #2a2a2a; text-align: center; }
+    #agreement th { color: #888; font-weight: normal; }
+    #agreement tr.row { cursor: pointer; }
+    #agreement tr.row:hover td { background: #262626; }
+    #agreement tr.dis td { background: rgba(190, 50, 50, 0.16); }
+    #agreement .note { color: #666; font-size: 0.72rem; margin-top: 0.3rem; }
     #score-panel { background: #1e1e1e; border-radius: 8px; padding: 0.9rem 1rem; margin-top: 1rem; }
     #score-panel h2 { font-size: 0.85rem; color: #888; margin-bottom: 0.5rem; }
     .score-big { font-size: 2.2rem; font-weight: bold; }
@@ -3080,6 +3092,10 @@ _MATCH_HTML = """<!DOCTYPE html>
     <div class="controls">
       <button id="mark-btn">+1 ball</button>
       <button id="undo-btn" hidden>Undo</button>
+      <span id="speed-ctl" hidden>
+        <button id="autospeed-btn" onclick="toggleAutoSpeed()">Auto speed</button>
+        <span id="speed-btns"></span>
+      </span>
       <span class="hint" id="mark-hint">Space bar also marks a ball at the current video position</span>
       <span id="phase-badge" hidden></span>
       <span id="save-state"></span>
@@ -3091,6 +3107,7 @@ _MATCH_HTML = """<!DOCTYPE html>
       <button id="submit-btn" onclick="submitScore()">Submit final score to PFMS</button>
       <div id="submit-result"></div>
       <div id="others"></div>
+      <div id="agreement"></div>
     </div>
   </div>
 
@@ -3110,6 +3127,60 @@ _MATCH_HTML = """<!DOCTYPE html>
     let marks = [];           // my marks for the current goal
     let saveTimer = null;
     let video = null;
+    // Motion-driven playback speed (same behavior as the clips reviewer):
+    // 2x through quiet video, 1x near motion, 0.25x during ball activity
+    let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
+    let speedMap = null;      // Uint8Array: 0=fast, 1=near-motion, 2=in-motion
+    const SPEEDS = [0.25, 0.5, 1, 2, 4];
+
+    function buildSpeedMap(signal, fps) {
+      const buf = new Uint8Array(signal.length);
+      const win = Math.round(3 * fps);
+      for (let i = 0; i < signal.length; i++) {
+        if (signal[i] > 0) {
+          buf[i] = 2;
+          const lo = Math.max(0, i - win), hi = Math.min(signal.length - 1, i + win);
+          for (let j = lo; j <= hi; j++) if (buf[j] < 1) buf[j] = 1;
+        }
+      }
+      return buf;
+    }
+
+    function setSpeed(rate) {
+      autoSpeed = false;
+      localStorage.setItem('pref_autospeed', 'false');
+      if (video) video.playbackRate = rate;
+      updateSpeedUi(rate);
+    }
+
+    function toggleAutoSpeed() {
+      autoSpeed = !autoSpeed;
+      localStorage.setItem('pref_autospeed', autoSpeed);
+      if (!autoSpeed && video) video.playbackRate = 1;
+      updateSpeedUi(1);
+    }
+
+    function updateSpeedUi(rate) {
+      document.getElementById('autospeed-btn').classList.toggle('on', autoSpeed);
+      const row = document.getElementById('speed-btns');
+      row.innerHTML = autoSpeed ? '' : SPEEDS.map(r =>
+        `<button class="speed-btn${r === rate ? ' active' : ''}" onclick="setSpeed(${r})">${r}×</button>`
+      ).join('');
+    }
+
+    setInterval(() => {
+      if (!autoSpeed || !video || !speedMap || !video.duration || video.paused) return;
+      const fps = (data.goals[goalName] && data.goals[goalName].fps) || 30;
+      const frameIdx = Math.min(Math.round(video.currentTime * fps), speedMap.length - 1);
+      // Look ahead by the distance we'll travel before the next poll so we
+      // don't overshoot a motion zone at high speed
+      const lookahead = Math.round(Math.max(video.playbackRate * 0.12, 0.3) * fps);
+      let worst = 0;
+      for (let f = frameIdx; f <= Math.min(frameIdx + lookahead, speedMap.length - 1); f++) {
+        if (speedMap[f] > worst) worst = speedMap[f];
+      }
+      video.playbackRate = worst === 2 ? 0.25 : worst === 1 ? 1 : 2;
+    }, 100);
 
     async function createReviewer() {
       const name = document.getElementById('login-name').value.trim();
@@ -3195,8 +3266,10 @@ _MATCH_HTML = """<!DOCTYPE html>
       if (data.live) {
         player.innerHTML = `<img class="stream" src="/api/stream/${encodeURIComponent(name)}.mjpeg" />`;
         video = null;
+        speedMap = null;
         tl.hidden = true;
         document.getElementById('legend').hidden = true;
+        document.getElementById('speed-ctl').hidden = true;
         document.getElementById('mark-hint').textContent = 'Marks are placed at the live recording position';
         updatePhaseBadge();
       } else {
@@ -3206,6 +3279,10 @@ _MATCH_HTML = """<!DOCTYPE html>
         video.addEventListener('loadedmetadata', drawTimeline);
         tl.hidden = false;
         buildLegend();
+        const sig = data.goals[name].signal;
+        speedMap = sig && sig.length ? buildSpeedMap(sig, data.goals[name].fps || 30) : null;
+        document.getElementById('speed-ctl').hidden = !speedMap;
+        updateSpeedUi(1);
         document.getElementById('phase-badge').hidden = true;
         drawTimeline();
       }
@@ -3246,6 +3323,28 @@ _MATCH_HTML = """<!DOCTYPE html>
         ctx.fillRect(s.start / dur * w, 0, Math.max((s.end - s.start) / dur * w, 1), h - 18);
       }
       ctx.globalAlpha = 1;
+      // Motion signal waveform (peak per pixel column)
+      const sig = (data.goals[goalName] || {}).signal;
+      if (sig && sig.length) {
+        const maxSig = Math.max(1, ...sig);
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        for (let x = 0; x < w; x++) {
+          const i0 = Math.floor(x / w * sig.length);
+          const i1 = Math.max(i0 + 1, Math.floor((x + 1) / w * sig.length));
+          let v = 0;
+          for (let i = i0; i < Math.min(i1, sig.length); i++) if (sig[i] > v) v = sig[i];
+          if (!v) continue;
+          const hh = Math.max(1, v / maxSig * (h - 24));
+          ctx.fillRect(x, h - 18 - hh, 1, hh);
+        }
+      }
+      // Machine-detected events (orange ticks)
+      const fps = (data.goals[goalName] || {}).fps || 30;
+      for (const e of (data.goals[goalName] || {}).events || []) {
+        const x = e.frame_idx / fps / dur * w;
+        ctx.fillStyle = '#ff9800';
+        ctx.fillRect(x - 1, h - 18, 2, 7);
+      }
       // My marks
       for (const m of marks) {
         const x = (m.video_time || 0) / dur * w;
@@ -3304,7 +3403,9 @@ _MATCH_HTML = """<!DOCTYPE html>
         return;
       }
       if (!video) return;
-      const t = video.currentTime;
+      // Compensate for human reaction time while playing (scaled by speed)
+      const lag = video.paused ? 0 : 0.150 * (video.playbackRate || 1);
+      const t = Math.max(0, video.currentTime - lag);
       // Repeated presses at (nearly) the same moment mean multiple balls
       const near = marks.find(m => Math.abs(m.video_time - t) < 0.4);
       if (near) near.n_balls = (near.n_balls || 1) + 1;
@@ -3392,6 +3493,61 @@ _MATCH_HTML = """<!DOCTYPE html>
         .map(([, a]) => `${a.label}: ${tally(a.marks || [], spansFor(goalName)).score}`);
       document.getElementById('others').textContent = others.length
         ? 'Other reviewers — ' + others.join(' · ') : '';
+      renderAgreement();
+    }
+
+    function seekTo(t) {
+      if (!video) return;
+      video.currentTime = Math.max(0, t);
+      video.play();
+    }
+
+    // Cross-check: cluster everyone's marks (auto-detect + each reviewer)
+    // within 2s and show a per-event matrix so a total mismatch points at the
+    // exact seconds of video to re-watch.
+    function renderAgreement() {
+      const el = document.getElementById('agreement');
+      if (!data || data.live || !goalName) { el.innerHTML = ''; return; }
+      const g = data.goals[goalName] || {};
+      const fps = g.fps || 30;
+      const sources = [];
+      if ((g.events || []).length) {
+        sources.push({label: 'Auto-detect', items: g.events.map(e =>
+          ({t: e.frame_idx / fps, n: e.n_balls || 1}))});
+      }
+      sources.push({label: (label || 'Me') + ' (you)', items: marks.map(m =>
+        ({t: m.video_time || 0, n: m.n_balls || 1}))});
+      for (const [tok, a] of Object.entries(g.annotations || {})) {
+        if (tok === token) continue;
+        sources.push({label: a.label || tok.slice(0, 6), items: (a.marks || []).map(m =>
+          ({t: m.video_time || 0, n: m.n_balls || 1}))});
+      }
+      if (sources.length < 2) { el.innerHTML = ''; return; }
+
+      const all = [];
+      sources.forEach((s, si) => s.items.forEach(it => all.push({si, ...it})));
+      all.sort((a, b) => a.t - b.t);
+      const clusters = [];
+      for (const it of all) {
+        const c = clusters[clusters.length - 1];
+        if (c && it.t - c.last <= 2.0) { c.items.push(it); c.last = it.t; }
+        else clusters.push({items: [it], last: it.t});
+      }
+
+      let disagreements = 0;
+      let html = '<table><tr><th>time</th>' + sources.map(s => `<th>${s.label}</th>`).join('') + '</tr>';
+      for (const c of clusters) {
+        const t = c.items.reduce((s, i) => s + i.t, 0) / c.items.length;
+        const counts = sources.map((_, si) => c.items.filter(i => i.si === si).reduce((s, i) => s + i.n, 0));
+        const agree = counts.every(v => v === counts[0]);
+        if (!agree) disagreements++;
+        const mm = Math.floor(t / 60), ss = (t % 60).toFixed(1).padStart(4, '0');
+        html += `<tr class="row${agree ? '' : ' dis'}" onclick="seekTo(${(t - 2).toFixed(2)})">` +
+          `<td>${mm}:${ss}</td>` + counts.map(v => `<td>${v || '—'}</td>`).join('') + '</tr>';
+      }
+      html += '</table>';
+      el.innerHTML = `<h2>Cross-check${disagreements ? ` — ${disagreements} disagreement(s)` : ' — all agree'}</h2>` +
+        html + '<div class="note">Tap a row to replay that moment. Rows in red have mismatched ball counts.</div>';
     }
 
     async function submitScore() {
@@ -4114,12 +4270,26 @@ def create_app(state: AppState) -> FastAPI:
             if not live:
                 sidecar = matches_dir / f"{info.get('clip', '')}.json"
                 annotations = {}
+                signal = []
+                events = []
                 if sidecar.exists():
                     try:
-                        annotations = json.loads(sidecar.read_text()).get("annotations") or {}
+                        sdata = json.loads(sidecar.read_text())
+                        annotations = sdata.get("annotations") or {}
+                        frames = sdata.get("frames") or []
+                        signal = [f.get("signal", 0) for f in frames]
+                        events = [
+                            {"frame_idx": i, "n_balls": (f.get("event") or {}).get("n_balls", 1)}
+                            for i, f in enumerate(frames)
+                            if f.get("event")
+                        ]
                     except Exception:
-                        annotations = {}
+                        pass
                 info["annotations"] = annotations
+                # Per-frame motion signal + machine-detected events — drives the
+                # auto-speed playback and the reviewer cross-check on the page
+                info["signal"] = signal
+                info["events"] = events
             goals[name] = info
         meta["goals"] = goals
         return meta
