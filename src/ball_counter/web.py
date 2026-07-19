@@ -3307,11 +3307,16 @@ _MATCH_HTML = """<!DOCTYPE html>
     }
 
     function buildLegend() {
-      const seen = [...new Set(spansFor(goalName).map(s => s.phase))];
-      document.getElementById('legend').hidden = false;
-      document.getElementById('legend').innerHTML = seen.map(p =>
+      const spans = spansFor(goalName);
+      const seen = [...new Set(spans.map(s => s.phase))];
+      let html = seen.map(p =>
         `<span><i style="background:${PHASE_COLORS[p] || '#333'}"></i>${p}${SCORING.has(p) ? '' : ' (not scored)'}</span>`
       ).join('');
+      if (spans.some(s => s.active === false)) {
+        html += `<span><i style="background:${PHASE_COLORS.teleop};opacity:0.25"></i>dimmed = this goal inactive (shift)</span>`;
+      }
+      document.getElementById('legend').hidden = false;
+      document.getElementById('legend').innerHTML = html;
     }
 
     function drawTimeline() {
@@ -3325,10 +3330,10 @@ _MATCH_HTML = """<!DOCTYPE html>
       const w = rect.width, h = rect.height;
       const dur = goalDuration(goalName) || 1;
       ctx.clearRect(0, 0, w, h);
-      // Phase spans
+      // Phase spans — dimmed when this goal's hub is inactive (shift scoring)
       for (const s of spansFor(goalName)) {
         ctx.fillStyle = PHASE_COLORS[s.phase] || '#333';
-        ctx.globalAlpha = SCORING.has(s.phase) ? 0.85 : 0.45;
+        ctx.globalAlpha = !SCORING.has(s.phase) ? 0.45 : s.active === false ? 0.22 : 0.85;
         ctx.fillRect(s.start / dur * w, 0, Math.max((s.end - s.start) / dur * w, 1), h - 18);
       }
       ctx.globalAlpha = 1;
@@ -3390,11 +3395,12 @@ _MATCH_HTML = """<!DOCTYPE html>
     function updatePhaseBadge() {
       if (!data.live) return;
       const tlEvents = data.timeline || [];
-      const phase = tlEvents.length ? tlEvents[tlEvents.length - 1].phase : '?';
+      const ev = tlEvents.length ? tlEvents[tlEvents.length - 1] : {phase: '?'};
       const badge = document.getElementById('phase-badge');
       badge.hidden = false;
-      badge.textContent = phase;
-      badge.style.background = PHASE_COLORS[phase] || '#333';
+      badge.textContent = ev.phase + (ev.sub && ev.sub !== ev.phase ? ` · ${ev.sub}` : '') +
+        (ev.inactive ? ` · ${ev.inactive} goal OFF` : '');
+      badge.style.background = PHASE_COLORS[ev.phase] || '#333';
     }
 
     async function addMark() {
@@ -3462,16 +3468,27 @@ _MATCH_HTML = """<!DOCTYPE html>
       setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 2500);
     }
 
+    // Mirrors tally_marks() on the server: marks count only in scoring spans
+    // while this goal's hub is active, with a 3s grace for balls in flight
+    // when the hub deactivates at a shift boundary.
+    const GOAL_GRACE_SEC = 3.0;
     function tally(marksList, spans) {
-      let score = 0, auto = 0, excluded = 0;
+      let score = 0, auto = 0, excluded = 0, goalInactive = 0;
       for (const m of marksList) {
         const t = m.video_time || 0, n = m.n_balls || 1;
-        const s = spans.find(s => s.start <= t && t < s.end);
-        if (!s || !SCORING.has(s.phase)) { excluded += n; continue; }
+        const i = spans.findIndex(s => s.start <= t && t < s.end);
+        if (i < 0 || !SCORING.has(spans[i].phase)) { excluded += n; continue; }
+        const s = spans[i];
+        if (s.active === false) {
+          const prev = i > 0 ? spans[i - 1] : null;
+          const inGrace = t - s.start <= GOAL_GRACE_SEC && prev &&
+            SCORING.has(prev.phase) && prev.active !== false;
+          if (!inGrace) { goalInactive += n; continue; }
+        }
         score += n;
         if (AUTO.has(s.phase)) auto += n;
       }
-      return {score, auto, excluded};
+      return {score, auto, excluded, goalInactive};
     }
 
     function updateScorePanel() {
@@ -3490,7 +3507,8 @@ _MATCH_HTML = """<!DOCTYPE html>
       document.getElementById('score-detail').textContent = data.live
         ? marks.length + ' mark(s) so far — final tally after the match ends'
         : `auto: ${t.auto} · teleop: ${t.score - t.auto}` +
-          (t.excluded ? ` · ${t.excluded} mark(s) outside scoring periods (ignored)` : '');
+          (t.excluded ? ` · ${t.excluded} mark(s) outside scoring periods (ignored)` : '') +
+          (t.goalInactive ? ` · ${t.goalInactive} mark(s) while this goal was inactive (not counted)` : '');
       document.getElementById('submit-btn').disabled = data.live || !marks.length || !token;
       const sub = (data.submitted || {})[alliance];
       document.getElementById('submit-result').textContent = sub

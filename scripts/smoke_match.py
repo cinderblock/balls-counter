@@ -79,7 +79,7 @@ def main() -> None:
             {"video_time": 2.6, "n_balls": 3},   # teleop
         ]
         t = tally_marks(marks, spans)
-        assert t == {"score": 5, "autoScore": 2, "excluded": 2}, t
+        assert t == {"score": 5, "autoScore": 2, "excluded": 2, "goalInactive": 0}, t
 
         # Live marks persisted into the sidecar
         sidecar = json.loads((tmp / "test-match-1_red-goal.json").read_text())

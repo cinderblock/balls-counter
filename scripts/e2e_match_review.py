@@ -24,7 +24,7 @@ import numpy as np
 
 from ball_counter.buffer import BufferFrame
 from ball_counter.config import PfmsConfig
-from ball_counter.match import MatchRecorder, PfmsMatchLink, load_match
+from ball_counter.match import MatchRecorder, PfmsMatchLink, load_match, tally_marks
 from ball_counter.web import AppState, start_server_thread
 
 PFMS_URL = "http://127.0.0.1:39871"
@@ -111,6 +111,37 @@ def main() -> int:
         for expected in ("countdown", "auto", "autoPause", "teleop", "paused", "endgame", "postMatch"):
             if expected not in phases:
                 failures.append(f"phase {expected} missing from timeline")
+
+        # Shift sub-periods (harness plays transition, jumps to shift4, endgame)
+        subs = [ev.get("sub") for ev in detail["timeline"]]
+        print(f"e2e: timeline subs: {subs}")
+        for expected_sub in ("transition", "shift4", "endgame"):
+            if expected_sub not in subs:
+                failures.append(f"sub-period {expected_sub} missing from timeline")
+
+        # Exactly one goal (the auto loser's) has an inactive shift-4 span;
+        # a mark deep in it must not count, one within the 3s grace must.
+        inactive_goals = [g for g in GOALS
+                          if any(s["phase"] == "teleop" and s.get("active") is False
+                                 for s in detail["goals"][g]["spans"])]
+        print(f"e2e: goals with an inactive shift span: {inactive_goals}")
+        if len(inactive_goals) != 1:
+            failures.append(f"expected exactly 1 goal with an inactive span, got {inactive_goals}")
+        else:
+            g = inactive_goals[0]
+            spans = detail["goals"][g]["spans"]
+            s = next(s for s in spans if s["phase"] == "teleop" and s.get("active") is False)
+            if s["end"] - s["start"] < 4.0:
+                failures.append(f"inactive span too short to test grace: {s}")
+            else:
+                t = tally_marks(
+                    [{"video_time": s["start"] + 3.5, "n_balls": 1},   # hub off > grace
+                     {"video_time": s["start"] + 1.0, "n_balls": 1}],  # ball in flight (grace)
+                    spans,
+                )
+                print(f"e2e: inactive-span tally on {g}: {t}")
+                if not (t["score"] == 1 and t["goalInactive"] == 1):
+                    failures.append(f"inactive/grace tally wrong: {t}")
         if set(detail["goals"].keys()) != set(GOALS):
             failures.append(f"unexpected goals: {list(detail['goals'])}")
         teams = {t["alliance"]: t["team"] for t in detail.get("teams", [])}

@@ -59,6 +59,10 @@ MAX_MATCH_SEC = 30 * 60
 # match is over and finalize what we have.
 PFMS_LOST_GRACE_SEC = 120.0
 
+# Balls in flight when a goal deactivates still count for this long —
+# mirrors GOAL_GRACE_SECONDS in the pFMS scoring engine.
+GOAL_GRACE_SEC = 3.0
+
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -180,7 +184,8 @@ class MatchRecorder:
 
     # ── Control (PFMS link thread) ───────────────────────────────────
 
-    def begin(self, match_id: str, meta: dict, phase: str, late: bool = False) -> None:
+    def begin(self, match_id: str, meta: dict, phase: str, late: bool = False,
+              sub: str | None = None, inactive: str | None = None) -> None:
         """Start recording all goals for a new match."""
         with self._lock:
             if self._accepting:
@@ -202,21 +207,27 @@ class MatchRecorder:
                 "submitted": {},
             }
             self._accepting = True
-        self.add_event(phase)
+        self.add_event(phase, sub=sub, inactive=inactive)
         log.info("match %s: recording started (phase %s%s)", match_id, phase, ", late" if late else "")
         print(f"match    - {match_id[:8]}: recording started ({phase}{', late join' if late else ''})")
 
-    def add_event(self, phase: str) -> None:
-        """Append a phase-timeline entry, pinned to each goal's video position."""
+    def add_event(self, phase: str, sub: str | None = None, inactive: str | None = None) -> None:
+        """Append a timeline entry (phase or shift change), pinned to each goal's video position.
+
+        ``sub`` is the REBUILT sub-period (transition/shift1-4/endgame);
+        ``inactive`` is the alliance whose goal is currently inactive.
+        """
         with self._lock:
             if self._meta is None or not self._accepting:
                 return
             self._meta["timeline"].append({
                 "phase": phase,
+                "sub": sub,
+                "inactive": inactive,
                 "ts": time.time(),
                 "frame_pos": {name: g.n_frames for name, g in self._goals.items()},
             })
-        print(f"match    - phase: {phase}")
+        print(f"match    - phase: {phase}" + (f" [{sub}{', ' + inactive + ' goal off' if inactive else ''}]" if sub else ""))
 
     def add_live_mark(self, token: str, label: str, goal: str, n_balls: int = 1) -> float | None:
         """Place a reviewer mark at the current video position while recording.
@@ -410,6 +421,7 @@ def goal_spans(meta: dict, goal: str) -> list[dict]:
     fps = info.get("fps") or 30.0
     total = (info.get("n_frames") or 0) / fps
     timeline = meta.get("timeline", [])
+    alliance = alliance_for_goal(goal)
     spans = []
     for i, ev in enumerate(timeline):
         start = ev.get("frame_pos", {}).get(goal, 0) / fps
@@ -420,9 +432,12 @@ def goal_spans(meta: dict, goal: str) -> list[dict]:
         phase = ev.get("phase", "")
         spans.append({
             "phase": phase,
+            "sub": ev.get("sub"),
             "start": round(start, 3),
             "end": round(end, 3),
             "scoring": phase in SCORING_PHASES,
+            # Whether THIS goal can be scored in during the span (shift scoring)
+            "active": ev.get("inactive") != alliance or alliance is None,
         })
     return spans
 
@@ -430,24 +445,40 @@ def goal_spans(meta: dict, goal: str) -> list[dict]:
 def tally_marks(marks: list[dict], spans: list[dict]) -> dict:
     """Sum a reviewer's marks over the scoring spans.
 
-    Returns ``{"score": total, "autoScore": auto_portion, "excluded": n}`` —
-    marks placed outside scoring spans (countdown, operator pauses) are not
-    counted and reported as excluded.
+    Returns ``{"score", "autoScore", "excluded", "goalInactive"}`` —
+    ``excluded`` counts marks outside scoring spans (countdown, operator
+    pauses); ``goalInactive`` counts marks while this goal's hub was inactive
+    during shift scoring. Balls marked within GOAL_GRACE_SEC of the hub
+    deactivating still count (in flight at the shift buzzer), mirroring the
+    pFMS scoring engine.
     """
     score = 0
     auto = 0
     excluded = 0
+    goal_inactive = 0
     for m in marks:
         t = m.get("video_time", 0)
         n = int(m.get("n_balls", 1))
-        span = next((s for s in spans if s["start"] <= t < s["end"]), None)
-        if span is None or not span["scoring"]:
+        idx = next((i for i, s in enumerate(spans) if s["start"] <= t < s["end"]), None)
+        if idx is None or not spans[idx]["scoring"]:
             excluded += n
             continue
+        span = spans[idx]
+        if not span.get("active", True):
+            prev = spans[idx - 1] if idx > 0 else None
+            in_grace = (
+                t - span["start"] <= GOAL_GRACE_SEC
+                and prev is not None
+                and prev["scoring"]
+                and prev.get("active", True)
+            )
+            if not in_grace:
+                goal_inactive += n
+                continue
         score += n
         if span["phase"] in AUTO_PHASES:
             auto += n
-    return {"score": score, "autoScore": auto, "excluded": excluded}
+    return {"score": score, "autoScore": auto, "excluded": excluded, "goalInactive": goal_inactive}
 
 
 def alliance_for_goal(goal: str) -> str | None:
@@ -471,7 +502,8 @@ class PfmsMatchLink:
         self._headers = {"Content-Type": "application/json"}
         if pfms.key:
             self._headers["X-API-Key"] = pfms.key
-        self._prev_phase: str | None = None
+        # (phase, subPeriod, inactiveGoalAlliance) of the last handled state
+        self._prev_key: tuple | None = None
         recorder.on_finalized = self._register_recording
 
     def start(self) -> None:
@@ -495,7 +527,7 @@ class PfmsMatchLink:
                     print(f"match    - connected to PFMS at {self._ws_url}")
                     announced_fail = False
                     lost_since = None
-                    self._prev_phase = None
+                    self._prev_key = None
                     while True:
                         # The client's ping/pong keepalive detects dead
                         # connections; recv can block indefinitely.
@@ -523,11 +555,15 @@ class PfmsMatchLink:
 
     def _handle(self, state: dict) -> None:
         phase = state.get("phase")
+        sub = state.get("subPeriod")
+        inactive = state.get("inactiveGoalAlliance")
         match_id = state.get("matchId")
-        prev = self._prev_phase
-        if phase == prev:
+        key = (phase, sub, inactive)
+        prev = self._prev_key[0] if self._prev_key else None
+        if key == self._prev_key:
             return
-        self._prev_phase = phase
+        phase_changed = phase != prev
+        self._prev_key = key
 
         recorder = self._recorder
 
@@ -539,20 +575,24 @@ class PfmsMatchLink:
         if not recorder.active:
             if match_id and phase in ACTIVE_PHASES:
                 meta = self._extract_meta(state)
-                recorder.begin(match_id, meta, phase, late=(phase != "countdown"))
+                recorder.begin(match_id, meta, phase, late=(phase != "countdown"),
+                               sub=sub, inactive=inactive)
             return
 
         # Recording is active
-        if phase == "created" and prev == "countdown":
+        if not phase_changed:
+            # Same phase, but the shift sub-period or goal-active state moved
+            recorder.add_event(phase, sub=sub, inactive=inactive)
+        elif phase == "created" and prev == "countdown":
             recorder.abort()
         elif phase in ACTIVE_PHASES:
-            recorder.add_event(phase)
+            recorder.add_event(phase, sub=sub, inactive=inactive)
         elif phase == "postMatch":
-            recorder.add_event("postMatch")
+            recorder.add_event("postMatch", sub=sub, inactive=inactive)
             recorder.finish(state.get("endReason") or "normal")
         elif phase in ("idle", "created"):
             # Abandoned from pause (or transitions missed) — no postMatch came
-            recorder.add_event(phase)
+            recorder.add_event(phase, sub=sub, inactive=inactive)
             recorder.finish(state.get("endReason") or "abandoned", tail_sec=0.0)
 
     @staticmethod
