@@ -1991,6 +1991,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
           <button class="anno-btn danger" onclick="clearAllMarks()">Clear all</button>
           <span style="flex:1"></span>
           <span id="speed-btns">
+          <button class="speed-btn" data-rate="0.125" onclick="setSpeed(0.125)">⅛×</button>
           <button class="speed-btn" data-rate="0.25" onclick="setSpeed(0.25)">¼×</button>
           <button class="speed-btn" data-rate="0.5"  onclick="setSpeed(0.5)">½×</button>
           <button class="speed-btn" data-rate="1"    onclick="setSpeed(1)">1×</button>
@@ -2042,7 +2043,7 @@ let myMarks = [];         // [{video_time, frame_idx, timestamp, n_balls}]
 let lastSave = null;      // {clipId, marks, videoTime} for undo-after-save
 let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
 let timelineRAF = null;
-let speedMap = null;      // Uint8Array: 0=fast(2x), 1=near-motion(1x), 2=in-motion(0.25x)
+let speedMap = null;      // Uint8Array: 0=fast(2x), 1=near-motion(1x), 2=in-motion(0.25x), 3=heavy-load(0.125x)
 
 // trim mode
 let trimMode = false;
@@ -2052,12 +2053,15 @@ let trimAdding = false;
 let trimAddStart = null;
 let trimAddEnd = null;
 
-function buildSpeedMap(signal, fps) {
+function buildSpeedMap(signal, fps, ballArea) {
   const buf = new Uint8Array(signal.length);
   const window = Math.round(3 * fps);
+  // Heavy load: enough moving area that the counter would call it 2+ balls
+  // (round(signal/ballArea) >= 2). Without ballArea, no heavy zone.
+  const heavy = ballArea ? ballArea * 1.5 : Infinity;
   for (let i = 0; i < signal.length; i++) {
     if (signal[i] > 0) {
-      buf[i] = 2; // in-motion
+      buf[i] = signal[i] >= heavy ? 3 : 2; // heavy-load / in-motion
       const lo = Math.max(0, i - window);
       const hi = Math.min(signal.length - 1, i + window);
       for (let j = lo; j <= hi; j++) if (buf[j] < 1) buf[j] = 1; // near-motion
@@ -2228,7 +2232,7 @@ async function openClip(id) {
 
   // autospeed — reset rate when clip changes but keep the toggle state
   video.playbackRate = 1;
-  speedMap = currentClip.signal ? buildSpeedMap(currentClip.signal, currentClip.fps || 30) : null;
+  speedMap = currentClip.signal ? buildSpeedMap(currentClip.signal, currentClip.fps || 30, currentClip.ball_area) : null;
 
   // events row
 
@@ -2509,7 +2513,7 @@ document.addEventListener('mouseup', () => {
 });
 
 // ── auto-speed ────────────────────────────────────────────────────────────────
-const SPEEDS = [0.25, 0.5, 1, 2, 4];
+const SPEEDS = [0.125, 0.25, 0.5, 1, 2, 4];
 
 function setSpeed(rate) {
   autoSpeed = false;
@@ -2575,7 +2579,8 @@ setInterval(() => {
     for (let f = frameIdx; f <= Math.min(frameIdx + lookaheadFrames, speedMap.length - 1); f++) {
       if (speedMap[f] > worstZone) worstZone = speedMap[f];
     }
-    if (worstZone === 2) video.playbackRate = 0.25;
+    if (worstZone === 3) video.playbackRate = 0.125;
+    else if (worstZone === 2) video.playbackRate = 0.25;
     else if (worstZone === 1) video.playbackRate = 1;
     else video.playbackRate = 2;
   }
@@ -3128,17 +3133,21 @@ _MATCH_HTML = """<!DOCTYPE html>
     let saveTimer = null;
     let video = null;
     // Motion-driven playback speed (same behavior as the clips reviewer):
-    // 2x through quiet video, 1x near motion, 0.25x during ball activity
+    // 2x through quiet video, 1x near motion, 0.25x during ball activity,
+    // 0.125x when the signal spans multiple balls' worth of area at once
     let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
-    let speedMap = null;      // Uint8Array: 0=fast, 1=near-motion, 2=in-motion
-    const SPEEDS = [0.25, 0.5, 1, 2, 4];
+    let speedMap = null;      // Uint8Array: 0=fast, 1=near-motion, 2=in-motion, 3=heavy-load
+    const SPEEDS = [0.125, 0.25, 0.5, 1, 2, 4];
+    const SPEED_LABELS = {0.125: '⅛', 0.25: '¼', 0.5: '½'};
 
-    function buildSpeedMap(signal, fps) {
+    function buildSpeedMap(signal, fps, ballArea) {
       const buf = new Uint8Array(signal.length);
       const win = Math.round(3 * fps);
+      // Heavy load: enough moving area that the counter would call it 2+ balls
+      const heavy = ballArea ? ballArea * 1.5 : Infinity;
       for (let i = 0; i < signal.length; i++) {
         if (signal[i] > 0) {
-          buf[i] = 2;
+          buf[i] = signal[i] >= heavy ? 3 : 2;
           const lo = Math.max(0, i - win), hi = Math.min(signal.length - 1, i + win);
           for (let j = lo; j <= hi; j++) if (buf[j] < 1) buf[j] = 1;
         }
@@ -3164,7 +3173,7 @@ _MATCH_HTML = """<!DOCTYPE html>
       document.getElementById('autospeed-btn').classList.toggle('on', autoSpeed);
       const row = document.getElementById('speed-btns');
       row.innerHTML = autoSpeed ? '' : SPEEDS.map(r =>
-        `<button class="speed-btn${r === rate ? ' active' : ''}" onclick="setSpeed(${r})">${r}×</button>`
+        `<button class="speed-btn${r === rate ? ' active' : ''}" onclick="setSpeed(${r})">${SPEED_LABELS[r] || r}×</button>`
       ).join('');
     }
 
@@ -3179,7 +3188,7 @@ _MATCH_HTML = """<!DOCTYPE html>
       for (let f = frameIdx; f <= Math.min(frameIdx + lookahead, speedMap.length - 1); f++) {
         if (speedMap[f] > worst) worst = speedMap[f];
       }
-      video.playbackRate = worst === 2 ? 0.25 : worst === 1 ? 1 : 2;
+      video.playbackRate = worst === 3 ? 0.125 : worst === 2 ? 0.25 : worst === 1 ? 1 : 2;
     }, 100);
 
     async function createReviewer() {
@@ -3280,7 +3289,7 @@ _MATCH_HTML = """<!DOCTYPE html>
         tl.hidden = false;
         buildLegend();
         const sig = data.goals[name].signal;
-        speedMap = sig && sig.length ? buildSpeedMap(sig, data.goals[name].fps || 30) : null;
+        speedMap = sig && sig.length ? buildSpeedMap(sig, data.goals[name].fps || 30, data.goals[name].ball_area) : null;
         document.getElementById('speed-ctl').hidden = !speedMap;
         updateSpeedUi(1);
         document.getElementById('phase-badge').hidden = true;
@@ -4056,6 +4065,11 @@ def create_app(state: AppState) -> FastAPI:
         d["id"] = clip_id
         if "flags" not in d:
             d["flags"] = []
+        # One ball's pixel area, from the live goal config — lets the reviewer
+        # tell "one ball" motion from heavy multi-ball flow (extra-slow playback)
+        goal = state.find_goal(d.get("goal") or "")
+        if goal is not None:
+            d["ball_area"] = goal.config.ball_area
         # Flatten per-frame signal array and events list for UI consumption
         frames = d.get("frames") or []
         if frames and "signal" not in d:
@@ -4290,6 +4304,11 @@ def create_app(state: AppState) -> FastAPI:
                 # auto-speed playback and the reviewer cross-check on the page
                 info["signal"] = signal
                 info["events"] = events
+                # One ball's pixel area (live goal config) — auto-speed slows
+                # further when the signal spans multiple balls at once
+                goal = state.find_goal(name)
+                if goal is not None:
+                    info["ball_area"] = goal.config.ball_area
             goals[name] = info
         meta["goals"] = goals
         return meta
