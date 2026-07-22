@@ -69,6 +69,10 @@ class AppState:
         self._capture_sessions: dict = {}
         self._goals: dict = {}  # goal_name -> GoalProcessor
         self._skip_histories: dict[str, list[int]] = {}
+        # Match recording context (set when PFMS match recording is armed)
+        self._matches_dir: "Path | None" = None
+        self._match_recorder = None
+        self._match_link = None
 
     def register_goal(self, name: str, goal) -> None:
         with self._lock:
@@ -162,6 +166,17 @@ class AppState:
     def get_clips_dir(self):
         with self._lock:
             return self._clips_dir
+
+    def set_match_context(self, matches_dir, recorder, link) -> None:
+        with self._lock:
+            self._matches_dir = matches_dir
+            self._match_recorder = recorder
+            self._match_link = link
+
+    def get_match_context(self):
+        """Returns (matches_dir, recorder, link) — all None if not armed."""
+        with self._lock:
+            return self._matches_dir, self._match_recorder, self._match_link
 
     def press_capture(self, goal_name: str, fps_hint: float = 30.0) -> str:
         """Record a capture button press. Returns 'new', 'grouped', or 'error'."""
@@ -1976,6 +1991,7 @@ video{width:100%;max-height:50vh;background:#000;display:block;border-radius:4px
           <button class="anno-btn danger" onclick="clearAllMarks()">Clear all</button>
           <span style="flex:1"></span>
           <span id="speed-btns">
+          <button class="speed-btn" data-rate="0.125" onclick="setSpeed(0.125)">⅛×</button>
           <button class="speed-btn" data-rate="0.25" onclick="setSpeed(0.25)">¼×</button>
           <button class="speed-btn" data-rate="0.5"  onclick="setSpeed(0.5)">½×</button>
           <button class="speed-btn" data-rate="1"    onclick="setSpeed(1)">1×</button>
@@ -2027,7 +2043,7 @@ let myMarks = [];         // [{video_time, frame_idx, timestamp, n_balls}]
 let lastSave = null;      // {clipId, marks, videoTime} for undo-after-save
 let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
 let timelineRAF = null;
-let speedMap = null;      // Uint8Array: 0=fast(2x), 1=near-motion(1x), 2=in-motion(0.25x)
+let speedMap = null;      // Uint8Array: 0=fast(2x), 1=near-motion(1x), 2=in-motion(0.25x), 3=heavy-load(0.125x)
 
 // trim mode
 let trimMode = false;
@@ -2037,12 +2053,15 @@ let trimAdding = false;
 let trimAddStart = null;
 let trimAddEnd = null;
 
-function buildSpeedMap(signal, fps) {
+function buildSpeedMap(signal, fps, ballArea) {
   const buf = new Uint8Array(signal.length);
   const window = Math.round(3 * fps);
+  // Heavy load: enough moving area that the counter would call it 2+ balls
+  // (round(signal/ballArea) >= 2). Without ballArea, no heavy zone.
+  const heavy = ballArea ? ballArea * 1.5 : Infinity;
   for (let i = 0; i < signal.length; i++) {
     if (signal[i] > 0) {
-      buf[i] = 2; // in-motion
+      buf[i] = signal[i] >= heavy ? 3 : 2; // heavy-load / in-motion
       const lo = Math.max(0, i - window);
       const hi = Math.min(signal.length - 1, i + window);
       for (let j = lo; j <= hi; j++) if (buf[j] < 1) buf[j] = 1; // near-motion
@@ -2213,7 +2232,7 @@ async function openClip(id) {
 
   // autospeed — reset rate when clip changes but keep the toggle state
   video.playbackRate = 1;
-  speedMap = currentClip.signal ? buildSpeedMap(currentClip.signal, currentClip.fps || 30) : null;
+  speedMap = currentClip.signal ? buildSpeedMap(currentClip.signal, currentClip.fps || 30, currentClip.ball_area) : null;
 
   // events row
 
@@ -2494,7 +2513,7 @@ document.addEventListener('mouseup', () => {
 });
 
 // ── auto-speed ────────────────────────────────────────────────────────────────
-const SPEEDS = [0.25, 0.5, 1, 2, 4];
+const SPEEDS = [0.125, 0.25, 0.5, 1, 2, 4];
 
 function setSpeed(rate) {
   autoSpeed = false;
@@ -2560,7 +2579,8 @@ setInterval(() => {
     for (let f = frameIdx; f <= Math.min(frameIdx + lookaheadFrames, speedMap.length - 1); f++) {
       if (speedMap[f] > worstZone) worstZone = speedMap[f];
     }
-    if (worstZone === 2) video.playbackRate = 0.25;
+    if (worstZone === 3) video.playbackRate = 0.125;
+    else if (worstZone === 2) video.playbackRate = 0.25;
     else if (worstZone === 1) video.playbackRate = 1;
     else video.playbackRate = 2;
   }
@@ -2942,6 +2962,659 @@ init();
 </html>"""
 
 
+_MATCHES_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Match Recordings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #eee; font-family: sans-serif; padding: 1rem; max-width: 760px; margin: 0 auto; }
+    h1 { font-size: 1.3rem; color: #aaa; margin-bottom: 1rem; }
+    h1 a { font-size: 0.7rem; color: #7bf; font-weight: normal; margin-left: 1rem; text-decoration: none; }
+    a.match { display: block; background: #1e1e1e; border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.6rem;
+              color: #eee; text-decoration: none; border: 1px solid #2a2a2a; }
+    a.match:hover { border-color: #47a; }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .live { color: #f55; font-weight: bold; animation: blink 1.2s infinite; }
+    @keyframes blink { 50% { opacity: 0.4; } }
+    .teams span.red { color: #f77; } .teams span.blue { color: #7af; }
+    .meta { color: #888; font-size: 0.8rem; }
+    .done { color: #6c6; font-size: 0.8rem; }
+    #empty { color: #666; padding: 2rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>Match Recordings <a href="/live">Live</a><a href="/scores">Clips</a></h1>
+  <div id="list"></div>
+  <div id="empty" hidden>No match recordings yet. Recordings start automatically when a PFMS match runs.</div>
+  <script>
+    async function load() {
+      const matches = await (await fetch('/api/match')).json();
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      document.getElementById('empty').hidden = matches.length > 0;
+      for (const m of matches) {
+        const a = document.createElement('a');
+        a.className = 'match';
+        a.href = '/match/' + m.match_id;
+        const red = (m.teams || []).filter(t => t.alliance === 'red').map(t => t.team).join(', ');
+        const blue = (m.teams || []).filter(t => t.alliance === 'blue').map(t => t.team).join(', ');
+        const when = m.started_at ? m.started_at.replace('T', ' ') : '';
+        const num = m.match_number ? 'Match ' + m.match_number : 'Match';
+        const reviewed = Object.keys(m.submitted || {});
+        a.innerHTML = `<div class="row">
+            <div><strong>${num}</strong> ${m.live ? '<span class="live">● LIVE</span>' : ''}</div>
+            <div class="teams"><span class="red">${red || '—'}</span> vs <span class="blue">${blue || '—'}</span></div>
+            <div class="meta">${when}${m.end_reason && m.end_reason !== 'normal' ? ' · ' + m.end_reason : ''}</div>
+            <div class="done">${reviewed.length ? 'reviewed: ' + reviewed.join(' + ') : ''}</div>
+          </div>`;
+        list.appendChild(a);
+      }
+    }
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>"""
+
+
+_MATCH_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Match Review</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #eee; font-family: sans-serif; padding: 1rem; max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 1.2rem; color: #aaa; margin-bottom: 0.3rem; }
+    h1 a { font-size: 0.7rem; color: #7bf; font-weight: normal; margin-left: 1rem; text-decoration: none; }
+    .teams { margin-bottom: 0.8rem; font-size: 0.9rem; }
+    .teams .red { color: #f77; } .teams .blue { color: #7af; }
+    .live-badge { color: #f55; font-weight: bold; animation: blink 1.2s infinite; margin-left: 0.6rem; }
+    @keyframes blink { 50% { opacity: 0.4; } }
+    #login { background: #1e1e1e; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
+    #login input { background: #111; color: #eee; border: 1px solid #444; padding: 0.4rem; border-radius: 4px; }
+    #login button { padding: 0.4rem 1rem; margin-left: 0.5rem; }
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 0.7rem; }
+    .tab { padding: 0.4rem 1.2rem; border-radius: 6px; border: 1px solid #444; background: #1e1e1e; color: #aaa;
+           cursor: pointer; font-size: 0.95rem; }
+    .tab.red.on { background: #5a1515; color: #fbb; border-color: #a44; }
+    .tab.blue.on { background: #14305a; color: #bdf; border-color: #47a; }
+    video, img.stream { width: 100%; border-radius: 6px; background: #000; display: block; }
+    #timeline { width: 100%; height: 74px; background: #1a1a1a; border-radius: 4px; margin-top: 0.4rem; cursor: crosshair;
+                touch-action: none; }
+    .legend { display: flex; gap: 0.9rem; flex-wrap: wrap; font-size: 0.7rem; color: #999; margin-top: 0.3rem; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 3px; vertical-align: -1px; }
+    .controls { display: flex; gap: 0.6rem; margin-top: 0.8rem; align-items: center; flex-wrap: wrap; }
+    #mark-btn { font-size: 1.3rem; padding: 0.7rem 2.2rem; background: #1a3a1a; color: #8f8; border: 1px solid #383;
+                border-radius: 8px; cursor: pointer; font-weight: bold; }
+    #mark-btn:active { background: #4a8a2a; color: #fff; }
+    #undo-btn { padding: 0.5rem 1rem; background: #333; color: #aaa; border: 1px solid #555; border-radius: 6px; cursor: pointer; }
+    #autospeed-btn, .speed-btn { padding: 0.4rem 0.7rem; background: #333; color: #aaa; border: 1px solid #555;
+                                 border-radius: 5px; cursor: pointer; font-size: 0.8rem; }
+    #autospeed-btn.on { background: #14305a; color: #bdf; border-color: #47a; }
+    .speed-btn.active { background: #555; color: #fff; }
+    .hint { color: #666; font-size: 0.75rem; }
+    #agreement h2 { font-size: 0.85rem; color: #888; margin-top: 1rem; margin-bottom: 0.3rem; }
+    #agreement table { border-collapse: collapse; font-size: 0.85rem; }
+    #agreement th, #agreement td { padding: 0.25rem 0.8rem; border-bottom: 1px solid #2a2a2a; text-align: center; }
+    #agreement th { color: #888; font-weight: normal; }
+    #agreement tr.row { cursor: pointer; }
+    #agreement tr.row:hover td { background: #262626; }
+    #agreement tr.dis td { background: rgba(190, 50, 50, 0.16); }
+    #agreement .note { color: #666; font-size: 0.72rem; margin-top: 0.3rem; }
+    #score-panel { background: #1e1e1e; border-radius: 8px; padding: 0.9rem 1rem; margin-top: 1rem; }
+    #score-panel h2 { font-size: 0.85rem; color: #888; margin-bottom: 0.5rem; }
+    .score-big { font-size: 2.2rem; font-weight: bold; }
+    .score-detail { color: #999; font-size: 0.85rem; margin-top: 0.2rem; }
+    #submit-btn { margin-top: 0.7rem; padding: 0.6rem 1.6rem; background: #14305a; color: #bdf; border: 1px solid #47a;
+                  border-radius: 6px; cursor: pointer; font-size: 1rem; }
+    #submit-btn:disabled { opacity: 0.45; cursor: default; }
+    #submit-result { margin-top: 0.5rem; font-size: 0.85rem; }
+    #others { margin-top: 0.6rem; font-size: 0.8rem; color: #999; }
+    #save-state { color: #565; font-size: 0.7rem; margin-left: auto; }
+    #phase-badge { padding: 0.2rem 0.7rem; border-radius: 4px; background: #333; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>Match Review <span id="live-badge" class="live-badge" hidden>● LIVE</span>
+    <a href="/matches">All matches</a></h1>
+  <div class="teams" id="teams"></div>
+
+  <div id="login" hidden>
+    Reviewing as: <input id="login-name" placeholder="Your name" />
+    <button onclick="createReviewer()">Start</button>
+  </div>
+
+  <div id="review-ui" hidden>
+    <div class="tabs" id="tabs"></div>
+    <div id="player"></div>
+    <canvas id="timeline" hidden></canvas>
+    <div class="legend" id="legend" hidden></div>
+    <div class="controls">
+      <button id="mark-btn">+1 ball</button>
+      <button id="undo-btn" hidden>Undo</button>
+      <span id="speed-ctl" hidden>
+        <button id="autospeed-btn" onclick="toggleAutoSpeed()">Auto speed</button>
+        <span id="speed-btns"></span>
+      </span>
+      <span class="hint" id="mark-hint">Space bar also marks a ball at the current video position</span>
+      <span id="phase-badge" hidden></span>
+      <span id="save-state"></span>
+    </div>
+    <div id="score-panel">
+      <h2>Your reviewed score — <span id="score-alliance"></span></h2>
+      <div class="score-big" id="score-total">0</div>
+      <div class="score-detail" id="score-detail"></div>
+      <button id="submit-btn" onclick="submitScore()">Submit final score to PFMS</button>
+      <div id="submit-result"></div>
+      <div id="others"></div>
+      <div id="agreement"></div>
+    </div>
+  </div>
+
+  <script>
+    const matchId = location.pathname.split('/').pop();
+    const PHASE_COLORS = {
+      countdown: '#444', auto: '#7c4dcc', autoPause: '#666', teleop: '#2e7d32',
+      endgame: '#f9a825', paused: '#8a1f1f', postMatch: '#37474f', idle: '#333', created: '#333',
+    };
+    const SCORING = new Set(['auto', 'autoPause', 'teleop', 'endgame', 'postMatch']);
+    const AUTO = new Set(['auto', 'autoPause']);
+
+    let token = localStorage.getItem('reviewer_token') || null;
+    let label = null;
+    let data = null;          // match metadata from the server
+    let goalName = null;      // currently selected goal
+    let marks = [];           // my marks for the current goal
+    let saveTimer = null;
+    let video = null;
+    // Motion-driven playback speed (same behavior as the clips reviewer):
+    // 2x through quiet video, 1x near motion, 0.25x during ball activity,
+    // 0.125x when the signal spans multiple balls' worth of area at once
+    let autoSpeed = localStorage.getItem('pref_autospeed') !== 'false';
+    let speedMap = null;      // Uint8Array: 0=fast, 1=near-motion, 2=in-motion, 3=heavy-load
+    const SPEEDS = [0.125, 0.25, 0.5, 1, 2, 4];
+    const SPEED_LABELS = {0.125: '⅛', 0.25: '¼', 0.5: '½'};
+
+    function buildSpeedMap(signal, fps, ballArea) {
+      const buf = new Uint8Array(signal.length);
+      const win = Math.round(3 * fps);
+      // Heavy load: enough moving area that the counter would call it 2+ balls
+      const heavy = ballArea ? ballArea * 1.5 : Infinity;
+      for (let i = 0; i < signal.length; i++) {
+        if (signal[i] > 0) {
+          buf[i] = signal[i] >= heavy ? 3 : 2;
+          const lo = Math.max(0, i - win), hi = Math.min(signal.length - 1, i + win);
+          for (let j = lo; j <= hi; j++) if (buf[j] < 1) buf[j] = 1;
+        }
+      }
+      return buf;
+    }
+
+    function setSpeed(rate) {
+      autoSpeed = false;
+      localStorage.setItem('pref_autospeed', 'false');
+      if (video) video.playbackRate = rate;
+      updateSpeedUi(rate);
+    }
+
+    function toggleAutoSpeed() {
+      autoSpeed = !autoSpeed;
+      localStorage.setItem('pref_autospeed', autoSpeed);
+      if (!autoSpeed && video) video.playbackRate = 1;
+      updateSpeedUi(1);
+    }
+
+    function updateSpeedUi(rate) {
+      document.getElementById('autospeed-btn').classList.toggle('on', autoSpeed);
+      const row = document.getElementById('speed-btns');
+      row.innerHTML = autoSpeed ? '' : SPEEDS.map(r =>
+        `<button class="speed-btn${r === rate ? ' active' : ''}" onclick="setSpeed(${r})">${SPEED_LABELS[r] || r}×</button>`
+      ).join('');
+    }
+
+    setInterval(() => {
+      if (!autoSpeed || !video || !speedMap || !video.duration || video.paused) return;
+      const fps = (data.goals[goalName] && data.goals[goalName].fps) || 30;
+      const frameIdx = Math.min(Math.round(video.currentTime * fps), speedMap.length - 1);
+      // Look ahead by the distance we'll travel before the next poll so we
+      // don't overshoot a motion zone at high speed
+      const lookahead = Math.round(Math.max(video.playbackRate * 0.12, 0.3) * fps);
+      let worst = 0;
+      for (let f = frameIdx; f <= Math.min(frameIdx + lookahead, speedMap.length - 1); f++) {
+        if (speedMap[f] > worst) worst = speedMap[f];
+      }
+      video.playbackRate = worst === 3 ? 0.125 : worst === 2 ? 0.25 : worst === 1 ? 1 : 2;
+    }, 100);
+
+    async function createReviewer() {
+      const name = document.getElementById('login-name').value.trim();
+      if (!name) return;
+      const r = await fetch('/api/reviewer/create', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({label: name})});
+      const d = await r.json();
+      token = d.token; label = d.label;
+      localStorage.setItem('reviewer_token', token);
+      document.getElementById('login').hidden = true;
+      document.getElementById('review-ui').hidden = false;
+      selectGoal(goalName);
+    }
+
+    async function resolveReviewer() {
+      if (!token) return false;
+      const reviewers = await (await fetch('/api/reviewers')).json();
+      if (reviewers[token]) { label = reviewers[token].label; return true; }
+      token = null;
+      return false;
+    }
+
+    function fmtTeams(teams) {
+      const red = (teams || []).filter(t => t.alliance === 'red').map(t => t.team).join(', ');
+      const blue = (teams || []).filter(t => t.alliance === 'blue').map(t => t.team).join(', ');
+      return `<span class="red">Red: ${red || '—'}</span> &nbsp;vs&nbsp; <span class="blue">Blue: ${blue || '—'}</span>`;
+    }
+
+    async function loadMatch() {
+      const r = await fetch('/api/match/' + matchId);
+      if (!r.ok) {
+        // Right after a live match ends there is a short gap while the video
+        // files are encoded — keep polling instead of giving up.
+        if (data && data.live) { setTimeout(loadMatch, 2000); return; }
+        document.getElementById('teams').textContent = 'Match not found';
+        return;
+      }
+      const wasLive = data && data.live;
+      data = await r.json();
+      const num = data.match_number ? 'Match ' + data.match_number : 'Match';
+      document.title = num + ' Review';
+      document.querySelector('h1').firstChild.textContent = num + ' Review ';
+      document.getElementById('teams').innerHTML = fmtTeams(data.teams) +
+        (data.started_at ? ` <span style="color:#666">· ${data.started_at.replace('T',' ')}</span>` : '');
+      document.getElementById('live-badge').hidden = !data.live;
+      buildTabs();
+      if (wasLive && !data.live) {
+        // Recording just finalized — switch from live view to video review
+        selectGoal(goalName);
+      }
+      if (data.live) { updatePhaseBadge(); setTimeout(loadMatch, 2000); }
+      updateScorePanel();
+    }
+
+    function buildTabs() {
+      const tabs = document.getElementById('tabs');
+      const names = Object.keys(data.goals || {});
+      if (!goalName && names.length) {
+        goalName = names.find(n => (data.goals[n].alliance || '').includes('red')) || names[0];
+      }
+      tabs.innerHTML = '';
+      for (const name of names) {
+        const alliance = data.goals[name].alliance || (name.includes('red') ? 'red' : name.includes('blue') ? 'blue' : '');
+        const b = document.createElement('button');
+        b.className = 'tab ' + alliance + (name === goalName ? ' on' : '');
+        b.textContent = (alliance ? alliance.toUpperCase() + ' goal' : name);
+        b.onclick = () => { goalName = name; selectGoal(name); buildTabs(); };
+        tabs.appendChild(b);
+      }
+    }
+
+    function myMarksFor(name) {
+      const anno = (data.goals[name] && data.goals[name].annotations) || {};
+      return (anno[token] && anno[token].marks) ? anno[token].marks.slice() : [];
+    }
+
+    function selectGoal(name) {
+      if (!name || !data) return;
+      goalName = name;
+      marks = myMarksFor(name);
+      const player = document.getElementById('player');
+      const tl = document.getElementById('timeline');
+      if (data.live) {
+        player.innerHTML = `<img class="stream" src="/api/stream/${encodeURIComponent(name)}.mjpeg" />`;
+        video = null;
+        speedMap = null;
+        tl.hidden = true;
+        document.getElementById('legend').hidden = true;
+        document.getElementById('speed-ctl').hidden = true;
+        document.getElementById('mark-hint').textContent = 'Marks are placed at the live recording position';
+        updatePhaseBadge();
+      } else {
+        player.innerHTML = `<video controls preload="auto" src="/api/match/${matchId}/${encodeURIComponent(name)}/video"></video>`;
+        video = player.querySelector('video');
+        video.addEventListener('timeupdate', drawTimeline);
+        video.addEventListener('loadedmetadata', drawTimeline);
+        tl.hidden = false;
+        buildLegend();
+        const sig = data.goals[name].signal;
+        speedMap = sig && sig.length ? buildSpeedMap(sig, data.goals[name].fps || 30, data.goals[name].ball_area) : null;
+        document.getElementById('speed-ctl').hidden = !speedMap;
+        updateSpeedUi(1);
+        document.getElementById('phase-badge').hidden = true;
+        drawTimeline();
+      }
+      document.getElementById('undo-btn').hidden = marks.length === 0;
+      updateScorePanel();
+    }
+
+    function spansFor(name) { return (data.goals[name] && data.goals[name].spans) || []; }
+
+    function goalDuration(name) {
+      const g = data.goals[name];
+      return g && g.fps ? g.n_frames / g.fps : (video && video.duration) || 0;
+    }
+
+    function buildLegend() {
+      const spans = spansFor(goalName);
+      const seen = [...new Set(spans.map(s => s.phase))];
+      let html = seen.map(p =>
+        `<span><i style="background:${PHASE_COLORS[p] || '#333'}"></i>${p}${SCORING.has(p) ? '' : ' (not scored)'}</span>`
+      ).join('');
+      if (spans.some(s => s.active === false)) {
+        html += `<span><i style="background:${PHASE_COLORS.teleop};opacity:0.25"></i>dimmed = this goal inactive (shift)</span>`;
+      }
+      document.getElementById('legend').hidden = false;
+      document.getElementById('legend').innerHTML = html;
+    }
+
+    function drawTimeline() {
+      const canvas = document.getElementById('timeline');
+      if (canvas.hidden) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      const w = rect.width, h = rect.height;
+      const dur = goalDuration(goalName) || 1;
+      ctx.clearRect(0, 0, w, h);
+      // Phase spans — dimmed when this goal's hub is inactive (shift scoring)
+      for (const s of spansFor(goalName)) {
+        ctx.fillStyle = PHASE_COLORS[s.phase] || '#333';
+        ctx.globalAlpha = !SCORING.has(s.phase) ? 0.45 : s.active === false ? 0.22 : 0.85;
+        ctx.fillRect(s.start / dur * w, 0, Math.max((s.end - s.start) / dur * w, 1), h - 18);
+      }
+      ctx.globalAlpha = 1;
+      // Motion signal waveform (peak per pixel column)
+      const sig = (data.goals[goalName] || {}).signal;
+      if (sig && sig.length) {
+        const maxSig = Math.max(1, ...sig);
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        for (let x = 0; x < w; x++) {
+          const i0 = Math.floor(x / w * sig.length);
+          const i1 = Math.max(i0 + 1, Math.floor((x + 1) / w * sig.length));
+          let v = 0;
+          for (let i = i0; i < Math.min(i1, sig.length); i++) if (sig[i] > v) v = sig[i];
+          if (!v) continue;
+          const hh = Math.max(1, v / maxSig * (h - 24));
+          ctx.fillRect(x, h - 18 - hh, 1, hh);
+        }
+      }
+      // Machine-detected events (orange ticks)
+      const fps = (data.goals[goalName] || {}).fps || 30;
+      for (const e of (data.goals[goalName] || {}).events || []) {
+        const x = e.frame_idx / fps / dur * w;
+        ctx.fillStyle = '#ff9800';
+        ctx.fillRect(x - 1, h - 18, 2, 7);
+      }
+      // My marks
+      for (const m of marks) {
+        const x = (m.video_time || 0) / dur * w;
+        ctx.fillStyle = '#ffee58';
+        ctx.beginPath();
+        ctx.arc(x, h - 26, 4 + 2 * ((m.n_balls || 1) - 1), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Playhead
+      if (video && video.duration) {
+        const x = video.currentTime / dur * w;
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+      // Time labels
+      ctx.fillStyle = '#777'; ctx.font = '10px sans-serif';
+      ctx.fillText('0:00', 2, h - 4);
+      const mm = Math.floor(dur / 60), ss = Math.round(dur % 60).toString().padStart(2, '0');
+      ctx.fillText(mm + ':' + ss, w - 30, h - 4);
+    }
+
+    document.getElementById('timeline').addEventListener('pointerdown', e => {
+      if (!video || !video.duration) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      video.currentTime = (e.clientX - rect.left) / rect.width * goalDuration(goalName);
+      drawTimeline();
+    });
+
+    function phaseAt(t) {
+      const s = spansFor(goalName).find(s => s.start <= t && t < s.end);
+      return s ? s.phase : null;
+    }
+
+    function updatePhaseBadge() {
+      if (!data.live) return;
+      const tlEvents = data.timeline || [];
+      const ev = tlEvents.length ? tlEvents[tlEvents.length - 1] : {phase: '?'};
+      const badge = document.getElementById('phase-badge');
+      badge.hidden = false;
+      badge.textContent = ev.phase + (ev.sub && ev.sub !== ev.phase ? ` · ${ev.sub}` : '') +
+        (ev.inactive ? ` · ${ev.inactive} goal OFF` : '');
+      badge.style.background = PHASE_COLORS[ev.phase] || '#333';
+    }
+
+    async function addMark() {
+      if (!token) return;
+      if (data.live) {
+        const r = await fetch(`/api/match/${matchId}/mark`, {method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({token, goal: goalName, n_balls: 1})});
+        if (r.ok) {
+          const d = await r.json();
+          marks.push({video_time: d.video_time, n_balls: 1});
+          updateScorePanel();
+          flashSave('marked live');
+        }
+        return;
+      }
+      if (!video) return;
+      // Compensate for human reaction time while playing (scaled by speed)
+      const lag = video.paused ? 0 : 0.150 * (video.playbackRate || 1);
+      const t = Math.max(0, video.currentTime - lag);
+      // Repeated presses at (nearly) the same moment mean multiple balls
+      const near = marks.find(m => Math.abs(m.video_time - t) < 0.4);
+      if (near) near.n_balls = (near.n_balls || 1) + 1;
+      else marks.push({video_time: t, frame_idx: Math.round(t * (data.goals[goalName].fps || 30)),
+                       timestamp: new Date().toISOString(), n_balls: 1});
+      marks.sort((a, b) => a.video_time - b.video_time);
+      document.getElementById('undo-btn').hidden = false;
+      drawTimeline();
+      updateScorePanel();
+      scheduleSave();
+    }
+
+    function undoMark() {
+      if (data.live || !marks.length) return;
+      // Remove the mark nearest the playhead (fall back to the last one)
+      const t = video ? video.currentTime : Infinity;
+      let idx = marks.length - 1, best = Infinity;
+      marks.forEach((m, i) => { const d = Math.abs(m.video_time - t); if (d < best) { best = d; idx = i; } });
+      if (marks[idx].n_balls > 1) marks[idx].n_balls -= 1;
+      else marks.splice(idx, 1);
+      document.getElementById('undo-btn').hidden = marks.length === 0;
+      drawTimeline();
+      updateScorePanel();
+      scheduleSave();
+    }
+
+    function scheduleSave() {
+      clearTimeout(saveTimer);
+      document.getElementById('save-state').textContent = '…';
+      saveTimer = setTimeout(async () => {
+        const r = await fetch(`/api/match/${matchId}/${encodeURIComponent(goalName)}/annotations`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({token, label, marks})});
+        flashSave(r.ok ? 'saved' : 'save failed');
+        if (r.ok && data.goals[goalName]) {
+          data.goals[goalName].annotations = data.goals[goalName].annotations || {};
+          data.goals[goalName].annotations[token] = {label, marks};
+        }
+      }, 800);
+    }
+
+    function flashSave(text) {
+      const el = document.getElementById('save-state');
+      el.textContent = text;
+      setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 2500);
+    }
+
+    // Mirrors tally_marks() on the server: marks count only in scoring spans
+    // while this goal's hub is active, with a 3s grace for balls in flight
+    // when the hub deactivates at a shift boundary.
+    const GOAL_GRACE_SEC = 3.0;
+    function tally(marksList, spans) {
+      let score = 0, auto = 0, excluded = 0, goalInactive = 0;
+      for (const m of marksList) {
+        const t = m.video_time || 0, n = m.n_balls || 1;
+        const i = spans.findIndex(s => s.start <= t && t < s.end);
+        if (i < 0 || !SCORING.has(spans[i].phase)) { excluded += n; continue; }
+        const s = spans[i];
+        if (s.active === false) {
+          const prev = i > 0 ? spans[i - 1] : null;
+          const inGrace = t - s.start <= GOAL_GRACE_SEC && prev &&
+            SCORING.has(prev.phase) && prev.active !== false;
+          if (!inGrace) { goalInactive += n; continue; }
+        }
+        score += n;
+        if (AUTO.has(s.phase)) auto += n;
+      }
+      return {score, auto, excluded, goalInactive};
+    }
+
+    function updateScorePanel() {
+      if (!data || !goalName) return;
+      const alliance = (data.goals[goalName] && data.goals[goalName].alliance) ||
+                       (goalName.includes('red') ? 'red' : 'blue');
+      document.getElementById('score-alliance').textContent = alliance.toUpperCase();
+      let t;
+      if (data.live) {
+        // Spans aren't final while live — show a running count of marks
+        t = {score: marks.reduce((s, m) => s + (m.n_balls || 1), 0), auto: null, excluded: 0};
+      } else {
+        t = tally(marks, spansFor(goalName));
+      }
+      document.getElementById('score-total').textContent = t.score;
+      document.getElementById('score-detail').textContent = data.live
+        ? marks.length + ' mark(s) so far — final tally after the match ends'
+        : `auto: ${t.auto} · teleop: ${t.score - t.auto}` +
+          (t.excluded ? ` · ${t.excluded} mark(s) outside scoring periods (ignored)` : '') +
+          (t.goalInactive ? ` · ${t.goalInactive} mark(s) while this goal was inactive (not counted)` : '');
+      document.getElementById('submit-btn').disabled = data.live || !marks.length || !token;
+      const sub = (data.submitted || {})[alliance];
+      document.getElementById('submit-result').textContent = sub
+        ? `Reported to PFMS: ${sub.score} (auto ${sub.autoScore}) by ${sub.reviewer} at ${sub.at || ''}`
+        : '';
+      // Other reviewers' tallies for this goal
+      const anno = (data.goals[goalName] && data.goals[goalName].annotations) || {};
+      const others = Object.entries(anno).filter(([tok]) => tok !== token)
+        .map(([, a]) => `${a.label}: ${tally(a.marks || [], spansFor(goalName)).score}`);
+      document.getElementById('others').textContent = others.length
+        ? 'Other reviewers — ' + others.join(' · ') : '';
+      renderAgreement();
+    }
+
+    function seekTo(t) {
+      if (!video) return;
+      video.currentTime = Math.max(0, t);
+      video.play();
+    }
+
+    // Cross-check: cluster everyone's marks (auto-detect + each reviewer)
+    // within 2s and show a per-event matrix so a total mismatch points at the
+    // exact seconds of video to re-watch.
+    function renderAgreement() {
+      const el = document.getElementById('agreement');
+      if (!data || data.live || !goalName) { el.innerHTML = ''; return; }
+      const g = data.goals[goalName] || {};
+      const fps = g.fps || 30;
+      const sources = [];
+      if ((g.events || []).length) {
+        sources.push({label: 'Auto-detect', items: g.events.map(e =>
+          ({t: e.frame_idx / fps, n: e.n_balls || 1}))});
+      }
+      sources.push({label: (label || 'Me') + ' (you)', items: marks.map(m =>
+        ({t: m.video_time || 0, n: m.n_balls || 1}))});
+      for (const [tok, a] of Object.entries(g.annotations || {})) {
+        if (tok === token) continue;
+        sources.push({label: a.label || tok.slice(0, 6), items: (a.marks || []).map(m =>
+          ({t: m.video_time || 0, n: m.n_balls || 1}))});
+      }
+      if (sources.length < 2) { el.innerHTML = ''; return; }
+
+      const all = [];
+      sources.forEach((s, si) => s.items.forEach(it => all.push({si, ...it})));
+      all.sort((a, b) => a.t - b.t);
+      const clusters = [];
+      for (const it of all) {
+        const c = clusters[clusters.length - 1];
+        if (c && it.t - c.last <= 2.0) { c.items.push(it); c.last = it.t; }
+        else clusters.push({items: [it], last: it.t});
+      }
+
+      let disagreements = 0;
+      let html = '<table><tr><th>time</th>' + sources.map(s => `<th>${s.label}</th>`).join('') + '</tr>';
+      for (const c of clusters) {
+        const t = c.items.reduce((s, i) => s + i.t, 0) / c.items.length;
+        const counts = sources.map((_, si) => c.items.filter(i => i.si === si).reduce((s, i) => s + i.n, 0));
+        const agree = counts.every(v => v === counts[0]);
+        if (!agree) disagreements++;
+        const mm = Math.floor(t / 60), ss = (t % 60).toFixed(1).padStart(4, '0');
+        html += `<tr class="row${agree ? '' : ' dis'}" onclick="seekTo(${(t - 2).toFixed(2)})">` +
+          `<td>${mm}:${ss}</td>` + counts.map(v => `<td>${v || '—'}</td>`).join('') + '</tr>';
+      }
+      html += '</table>';
+      el.innerHTML = `<h2>Cross-check${disagreements ? ` — ${disagreements} disagreement(s)` : ' — all agree'}</h2>` +
+        html + '<div class="note">Tap a row to replay that moment. Rows in red have mismatched ball counts.</div>';
+    }
+
+    async function submitScore() {
+      const alliance = (data.goals[goalName] && data.goals[goalName].alliance) ||
+                       (goalName.includes('red') ? 'red' : 'blue');
+      const btn = document.getElementById('submit-btn');
+      btn.disabled = true;
+      const r = await fetch(`/api/match/${matchId}/submit`, {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token, alliance})});
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.ok) {
+        data.submitted = data.submitted || {};
+        data.submitted[alliance] = d.submitted;
+        flashSave('submitted');
+      } else {
+        document.getElementById('submit-result').textContent = 'Submit failed: ' + (d.detail || d.error || r.status);
+      }
+      btn.disabled = false;
+      updateScorePanel();
+    }
+
+    document.getElementById('mark-btn').addEventListener('click', addMark);
+    document.getElementById('undo-btn').addEventListener('click', undoMark);
+    document.addEventListener('keydown', e => {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.code === 'Space') { e.preventDefault(); addMark(); }
+    });
+
+    (async () => {
+      const known = await resolveReviewer();
+      document.getElementById('login').hidden = known;
+      document.getElementById('review-ui').hidden = !known;
+      await loadMatch();
+      if (known) selectGoal(goalName);
+    })();
+  </script>
+</body>
+</html>"""
+
+
 def create_app(state: AppState) -> FastAPI:
     app = FastAPI(title="Ball Counter API")
 
@@ -3022,8 +3695,9 @@ def create_app(state: AppState) -> FastAPI:
 <body>
   <h1>Ball Counter
     <a href="/scores" style="font-size:0.7rem;color:#7bf;font-weight:normal;vertical-align:middle;margin-left:1rem">Scores</a>
+    <a href="/matches" style="font-size:0.7rem;color:#7bf;font-weight:normal;vertical-align:middle;margin-left:0.5rem">Matches</a>
     <a href="/balls" style="font-size:0.7rem;color:#888;font-weight:normal;vertical-align:middle;margin-left:0.5rem">Balls</a>
-    <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="font-size:0.6rem;color:#444;font-weight:normal;vertical-align:middle;margin-left:0.5rem;text-decoration:none" title="GitHub">&#9135; cinderblock/balls-counter</a>
+    <a href="https://github.com/cinderblock/balls-counter" target="_blank" style="font-size:0.6rem;color:#444;font-weight:normal;vertical-align:middle;margin-left:0.5rem;text-decoration:none">&#9135; cinderblock/balls-counter</a>
   </h1>
   <div id="goals">{stream_cards}</div>
   <div id="log">
@@ -3409,6 +4083,11 @@ def create_app(state: AppState) -> FastAPI:
         d["id"] = clip_id
         if "flags" not in d:
             d["flags"] = []
+        # One ball's pixel area, from the live goal config — lets the reviewer
+        # tell "one ball" motion from heavy multi-ball flow (extra-slow playback)
+        goal = state.find_goal(d.get("goal") or "")
+        if goal is not None:
+            d["ball_area"] = goal.config.ball_area
         # Flatten per-frame signal array and events list for UI consumption
         frames = d.get("frames") or []
         if frames and "signal" not in d:
@@ -3558,6 +4237,200 @@ def create_app(state: AppState) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         return {"ok": True, "new_ids": new_ids}
+
+    # ------------------------------------------------------------------ match review
+
+    @app.get("/matches", response_class=HTMLResponse)
+    def matches_page():
+        return HTMLResponse(_MATCHES_HTML)
+
+    @app.get("/match/{match_id}", response_class=HTMLResponse)
+    def match_page(match_id: str):
+        return HTMLResponse(_MATCH_HTML)
+
+    def _match_summary(meta: dict, live: bool) -> dict:
+        return {
+            "match_id": meta.get("match_id"),
+            "match_number": meta.get("match_number"),
+            "started_at": meta.get("started_at"),
+            "end_reason": meta.get("end_reason"),
+            "teams": meta.get("teams", []),
+            "submitted": meta.get("submitted", {}),
+            "live": live,
+        }
+
+    @app.get("/api/match")
+    def api_matches():
+        from ball_counter.match import list_matches
+        matches_dir, recorder, _link = state.get_match_context()
+        if matches_dir is None:
+            return []
+        out = []
+        live = recorder.live_summary() if recorder is not None else None
+        if live is not None:
+            out.append(_match_summary(live, live=True))
+        for meta in list_matches(matches_dir):
+            out.append(_match_summary(meta, live=False))
+        return out
+
+    def _load_match_or_live(match_id: str):
+        """Returns (meta, live) for a match id, preferring the in-progress recording."""
+        from ball_counter.match import load_match
+        matches_dir, recorder, _link = state.get_match_context()
+        if matches_dir is None:
+            raise HTTPException(status_code=503, detail="Match recording not configured")
+        live = recorder.live_summary() if recorder is not None else None
+        if live is not None and live.get("match_id") == match_id:
+            return live, True
+        meta = load_match(matches_dir, match_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="Match not found")
+        return meta, False
+
+    @app.get("/api/match/{match_id}")
+    def api_match_detail(match_id: str):
+        from ball_counter.match import alliance_for_goal, goal_spans
+        matches_dir, _recorder, _link = state.get_match_context()
+        meta, live = _load_match_or_live(match_id)
+        meta = dict(meta)
+        meta["live"] = live
+        goals = {}
+        for name, info in (meta.get("goals") or {}).items():
+            info = dict(info)
+            info["alliance"] = alliance_for_goal(name)
+            info["spans"] = goal_spans(meta, name)
+            if not live:
+                sidecar = matches_dir / f"{info.get('clip', '')}.json"
+                annotations = {}
+                signal = []
+                events = []
+                if sidecar.exists():
+                    try:
+                        sdata = json.loads(sidecar.read_text())
+                        annotations = sdata.get("annotations") or {}
+                        frames = sdata.get("frames") or []
+                        signal = [f.get("signal", 0) for f in frames]
+                        events = [
+                            {"frame_idx": i, "n_balls": (f.get("event") or {}).get("n_balls", 1)}
+                            for i, f in enumerate(frames)
+                            if f.get("event")
+                        ]
+                    except Exception:
+                        pass
+                info["annotations"] = annotations
+                # Per-frame motion signal + machine-detected events — drives the
+                # auto-speed playback and the reviewer cross-check on the page
+                info["signal"] = signal
+                info["events"] = events
+                # One ball's pixel area (live goal config) — auto-speed slows
+                # further when the signal spans multiple balls at once
+                goal = state.find_goal(name)
+                if goal is not None:
+                    info["ball_area"] = goal.config.ball_area
+            goals[name] = info
+        meta["goals"] = goals
+        return meta
+
+    @app.get("/api/match/{match_id}/{goal}/video")
+    def api_match_video(match_id: str, goal: str):
+        from starlette.responses import FileResponse as _FileResponse
+        matches_dir, _recorder, _link = state.get_match_context()
+        meta, live = _load_match_or_live(match_id)
+        if live:
+            raise HTTPException(status_code=409, detail="Match is still recording")
+        info = (meta.get("goals") or {}).get(goal)
+        if info is None:
+            raise HTTPException(status_code=404, detail="Goal not found in this match")
+        mp4 = matches_dir / f"{info['clip']}.mp4"
+        if not mp4.exists():
+            raise HTTPException(status_code=404, detail="Video not found")
+        return _FileResponse(str(mp4), media_type="video/mp4")
+
+    @app.post("/api/match/{match_id}/{goal}/annotations")
+    def api_match_annotations(match_id: str, goal: str, body: dict):
+        matches_dir, _recorder, _link = state.get_match_context()
+        meta, live = _load_match_or_live(match_id)
+        if live:
+            raise HTTPException(status_code=409, detail="Match is still recording — use the live mark endpoint")
+        info = (meta.get("goals") or {}).get(goal)
+        if info is None:
+            raise HTTPException(status_code=404, detail="Goal not found in this match")
+        token = body.get("token")
+        if not token:
+            raise HTTPException(status_code=400, detail="token is required")
+        clips_dir = state.get_clips_dir()
+        reviewers = _load_reviewers(clips_dir) if clips_dir is not None else {}
+        label = reviewers.get(token, {}).get("label") or body.get("label") or token[:8]
+        sidecar = matches_dir / f"{info['clip']}.json"
+        if not sidecar.exists():
+            raise HTTPException(status_code=404, detail="Recording sidecar not found")
+        data = json.loads(sidecar.read_text())
+        data.setdefault("annotations", {})[token] = {
+            "label": label,
+            "saved_at": datetime.utcnow().isoformat() + "Z",
+            "marks": body.get("marks") or [],
+        }
+        sidecar.write_text(json.dumps(data, indent=2))
+        print(f"match    - {label} saved {len(body.get('marks') or [])} mark(s) for {info['clip']}")
+        return {"ok": True}
+
+    @app.post("/api/match/{match_id}/mark")
+    def api_match_live_mark(match_id: str, body: dict):
+        _matches_dir, recorder, _link = state.get_match_context()
+        if recorder is None or not recorder.active or recorder.match_id != match_id:
+            raise HTTPException(status_code=409, detail="This match is not currently recording")
+        token = body.get("token")
+        goal = body.get("goal")
+        if not token or not goal:
+            raise HTTPException(status_code=400, detail="token and goal are required")
+        clips_dir = state.get_clips_dir()
+        reviewers = _load_reviewers(clips_dir) if clips_dir is not None else {}
+        label = reviewers.get(token, {}).get("label") or token[:8]
+        video_time = recorder.add_live_mark(token, label, goal, int(body.get("n_balls", 1)))
+        if video_time is None:
+            raise HTTPException(status_code=404, detail=f"Goal '{goal}' is not being recorded")
+        return {"ok": True, "video_time": video_time}
+
+    @app.post("/api/match/{match_id}/submit")
+    def api_match_submit(match_id: str, body: dict):
+        from ball_counter.match import alliance_for_goal, goal_spans, save_match, tally_marks
+        matches_dir, _recorder, link = state.get_match_context()
+        meta, live = _load_match_or_live(match_id)
+        if live:
+            raise HTTPException(status_code=409, detail="Match is still recording — submit after it ends")
+        token = body.get("token")
+        alliance = body.get("alliance")
+        if not token or alliance not in ("red", "blue"):
+            raise HTTPException(status_code=400, detail="token and alliance (red/blue) are required")
+        goal = next((g for g in (meta.get("goals") or {}) if alliance_for_goal(g) == alliance), None)
+        if goal is None:
+            raise HTTPException(status_code=404, detail=f"No {alliance} goal in this match")
+        sidecar = matches_dir / f"{meta['goals'][goal]['clip']}.json"
+        if not sidecar.exists():
+            raise HTTPException(status_code=404, detail="Recording sidecar not found")
+        annotations = json.loads(sidecar.read_text()).get("annotations") or {}
+        anno = annotations.get(token)
+        if not anno or not anno.get("marks"):
+            raise HTTPException(status_code=400, detail="You have no marks on this goal yet")
+        clips_dir = state.get_clips_dir()
+        reviewers = _load_reviewers(clips_dir) if clips_dir is not None else {}
+        label = reviewers.get(token, {}).get("label") or anno.get("label") or token[:8]
+        result = tally_marks(anno["marks"], goal_spans(meta, goal))
+        if link is None:
+            raise HTTPException(status_code=503, detail="PFMS link not configured")
+        ok, err = link.submit_review(match_id, alliance, result["score"], result["autoScore"], label)
+        if not ok:
+            raise HTTPException(status_code=502, detail=f"PFMS rejected the report: {err}")
+        submitted = {
+            **result,
+            "reviewer": label,
+            "goal": goal,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+        meta.setdefault("submitted", {})[alliance] = submitted
+        save_match(matches_dir, meta)
+        print(f"match    - {label} reported {alliance} = {result['score']} (auto {result['autoScore']}) to PFMS")
+        return {"ok": True, "submitted": submitted}
 
     # ------------------------------------------------------------------ label
 

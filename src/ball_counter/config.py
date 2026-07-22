@@ -11,6 +11,9 @@ class PfmsConfig:
     url: str
     key: str | None = None
     source: str = "ball-counter"
+    # This service's own base URL (e.g. "http://sentinel:8080") — used to
+    # register match review page links with PFMS. None = don't register.
+    public_url: str | None = None
 
 
 @dataclass
@@ -86,6 +89,7 @@ def _parse_pfms(data: dict) -> PfmsConfig | None:
         url=url,
         key=data.get("pfms_key") or None,
         source=data.get("pfms_source", "ball-counter"),
+        public_url=data.get("public_url") or None,
     )
 
 
@@ -146,6 +150,8 @@ def save_configs(configs: list[SourceConfig], path: Path,
             data["pfms_key"] = pfms.key
         if pfms.source != "ball-counter":
             data["pfms_source"] = pfms.source
+        if pfms.public_url:
+            data["public_url"] = pfms.public_url
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     print(f"Config saved to {path}")
