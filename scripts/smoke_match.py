@@ -71,15 +71,16 @@ def main() -> None:
         assert phases == ["countdown", "auto", "paused", "teleop", "postMatch"], phases
         assert not spans[0]["scoring"] and spans[1]["scoring"] and not spans[2]["scoring"]
 
-        # Tally: marks in countdown (excluded), auto, paused (excluded), teleop x2
+        # Tally: marks in countdown (excluded), auto, just into the pause
+        # (in flight → counts, still auto), teleop x3
         marks = [
             {"video_time": 0.2, "n_balls": 1},   # countdown -> excluded
             {"video_time": 0.7, "n_balls": 2},   # auto -> auto portion
-            {"video_time": 1.6, "n_balls": 1},   # paused -> excluded
+            {"video_time": 1.6, "n_balls": 1},   # 0.1s into pause -> grace, auto
             {"video_time": 2.6, "n_balls": 3},   # teleop
         ]
         t = tally_marks(marks, spans)
-        assert t == {"score": 5, "autoScore": 2, "excluded": 2, "goalInactive": 0}, t
+        assert t == {"score": 6, "autoScore": 3, "excluded": 1, "goalInactive": 0}, t
 
         # Live marks persisted into the sidecar
         sidecar = json.loads((tmp / "test-match-1_red-goal.json").read_text())

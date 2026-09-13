@@ -287,8 +287,10 @@ def run(args: argparse.Namespace) -> None:
     forwarder = None
     if pfms_cfg is not None:
         from ball_counter.pfms import PfmsForwarder
-        forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source)
-        print(f"pfms     - enabled -> {pfms_cfg.url}")
+        forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source,
+                                  capture_latency_ms=pfms_cfg.capture_latency_ms)
+        print(f"pfms     - enabled -> {pfms_cfg.url} "
+              f"(capture latency {pfms_cfg.capture_latency_ms} ms)")
 
     clips_dir = config_path.parent / "clips"
 
@@ -416,7 +418,10 @@ def run(args: argparse.Namespace) -> None:
                                     else "blue" if "blue" in goal.name
                                     else None)
                         if alliance:
-                            forwarder.send(alliance, goal.config.pfms_element, event.n_balls)
+                            # Pin the score to the frame the ball crossed on,
+                            # not the (later) frame the detector fired on.
+                            forwarder.send(alliance, goal.config.pfms_element, event.n_balls,
+                                           occurred_mono=event.mono, occurred_wall=event.wall)
                         else:
                             print(f"pfms     - {goal.name}: cannot determine alliance")
 

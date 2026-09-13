@@ -14,6 +14,9 @@ class PfmsConfig:
     # This service's own base URL (e.g. "http://sentinel:8080") — used to
     # register match review page links with PFMS. None = don't register.
     public_url: str | None = None
+    # Camera → RTSP → decoder → Python latency, in ms. Added to the age of
+    # every score reported to pFMS, since the frame read time cannot see it.
+    capture_latency_ms: int = 0
 
 
 @dataclass
@@ -90,6 +93,7 @@ def _parse_pfms(data: dict) -> PfmsConfig | None:
         key=data.get("pfms_key") or None,
         source=data.get("pfms_source", "ball-counter"),
         public_url=data.get("public_url") or None,
+        capture_latency_ms=int(data.get("pfms_capture_latency_ms") or 0),
     )
 
 
@@ -152,6 +156,8 @@ def save_configs(configs: list[SourceConfig], path: Path,
             data["pfms_source"] = pfms.source
         if pfms.public_url:
             data["public_url"] = pfms.public_url
+        if pfms.capture_latency_ms:
+            data["pfms_capture_latency_ms"] = pfms.capture_latency_ms
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     print(f"Config saved to {path}")

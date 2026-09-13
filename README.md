@@ -87,13 +87,39 @@ Config keys:
 {
   "pfms_url": "http://pfms.tsl",       // pFMS base URL
   "pfms_key": "…",                     // API key (optional)
-  "public_url": "http://sentinel:8080" // this service's own URL — lets pFMS
-                                       // link its match history to /match/<id>
+  "public_url": "http://sentinel:8080", // this service's own URL — lets pFMS
+                                        // link its match history to /match/<id>
+  "pfms_capture_latency_ms": 0          // camera→decoder latency, see below
 }
 ```
 
 Recordings are saved under `<config dir>/clips/matches/` as one MP4 + JSON
 sidecar per goal plus a `<match id>.match.json` metadata file.
+
+### Score timing
+
+pFMS judges every score at the moment the ball actually scored — auto vs
+teleop, which shift, whether that alliance's goal was on. The detector
+only sees a ball some time after it crossed (decoder latency, then the
+signal has to peak and fall again before the threshold detector fires;
+a retry after a network blip adds more). So every score sent to pFMS
+carries `ageMs`: how long before the request was sent the ball crossed,
+recomputed at each send attempt from the frame's monotonic read time.
+pFMS subtracts it from its own receive time, so the two machines' clocks
+never need to agree and a late report still lands in the right period.
+
+What the counter can't see is the time between the camera capturing a
+frame and Python reading it. Set `pfms_capture_latency_ms` to cover it
+(default 0). To measure: point the camera at a stopwatch or a phone
+showing milliseconds, compare the time shown in a frame with the
+counter's frame read time (the `/live` page timestamp or the event log),
+and take the typical difference.
+
+The forwarder queues scores and posts them from one worker: a burst of
+balls goes out as one request, and a failed request is retried with
+backoff (1 s → 30 s) instead of the score being lost. Scores older than
+ten minutes are dropped. Each log line shows where pFMS filed the score
+(`red +1 (0.42s old -> shift1)`) and whether it counted.
 
 ### Field zone counter
 

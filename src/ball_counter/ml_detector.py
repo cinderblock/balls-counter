@@ -211,7 +211,10 @@ class MLPeakDetector:
             n_balls = max(1, round(area / self.ball_area)) if area > 0 else 1
             self.count += n_balls
             self._last_detected_frame = abs_frame
-            events.append(MotionEvent(frame=abs_frame, n_balls=n_balls, peak_area=area))
+            # abs_frame is the peak (the crossing); we're only finding it now,
+            # `current_frame` frames later.
+            events.append(MotionEvent(frame=abs_frame, n_balls=n_balls, peak_area=area,
+                                      lag_frames=max(0, current_frame - abs_frame)))
 
         return events
 

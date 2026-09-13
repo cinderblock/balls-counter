@@ -212,6 +212,7 @@ class YOLOBallDetector:
 
         # Count tracks that originated inside ROI and have enough age
         new_counts = 0
+        oldest_lag = 0  # frames since the earliest counted ball first appeared
         for track in self.tracks:
             if (not track.counted
                     and track.first_inside_roi
@@ -219,6 +220,7 @@ class YOLOBallDetector:
                 track.counted = True
                 new_counts += 1
                 self.total_count += 1
+                oldest_lag = max(oldest_lag, track.age - 1)
                 if debug:
                     print(f"  [yolo] COUNTED track id={track.id} age={track.age} "
                           f"total={self.total_count}")
@@ -235,6 +237,7 @@ class YOLOBallDetector:
                 frame=self.frame_idx,
                 n_balls=new_counts,
                 peak_area=0,
+                lag_frames=oldest_lag,
             )
         return None
 

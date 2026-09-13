@@ -14,6 +14,15 @@ class MotionEvent:
     frame: int
     n_balls: int
     peak_area: int
+    # How many frames before the detector fired the ball actually crossed
+    # (the signal peak / the frame the track first appeared in the goal).
+    # The threshold detector only fires once the signal has fallen again, so
+    # this is typically a few frames. Used to pin the score to its moment.
+    lag_frames: int = 0
+    # Filled in by GoalProcessor: monotonic and wall-clock time of the frame
+    # the ball crossed on (None when the frame time isn't known, e.g. tests).
+    mono: float | None = None
+    wall: float | None = None
 
 
 class MotionCounter:
@@ -96,6 +105,7 @@ class MotionCounter:
         self.prev_area = 0
         self.rising = False
         self.peak_val = 0
+        self.peak_frame = 0  # frame index the current peak was seen on
         self.cooldown_remaining = 0
         self._last_moving_in_zone: np.ndarray | None = None
 
@@ -122,12 +132,15 @@ class MotionCounter:
         else:
             if area > self.prev_area and area > self.min_rise:
                 self.rising = True
-                self.peak_val = max(self.peak_val, area)
+                if area > self.peak_val:
+                    self.peak_val = area
+                    self.peak_frame = self.frame_idx
             elif self.rising and area < self.peak_val * self.fall_ratio:
                 if self.peak_val >= self.min_peak:
                     n_balls = max(1, round(self.peak_val / self.ball_area))
                     self.count += n_balls
-                    event = MotionEvent(self.frame_idx, n_balls, self.peak_val)
+                    event = MotionEvent(self.frame_idx, n_balls, self.peak_val,
+                                        lag_frames=max(0, self.frame_idx - self.peak_frame))
                     self.events.append(event)
                     self.cooldown_remaining = self.cooldown
                 self.rising = False

@@ -449,8 +449,8 @@ def tally_marks(marks: list[dict], spans: list[dict]) -> dict:
     ``excluded`` counts marks outside scoring spans (countdown, operator
     pauses); ``goalInactive`` counts marks while this goal's hub was inactive
     during shift scoring. Balls marked within GOAL_GRACE_SEC of the hub
-    deactivating still count (in flight at the shift buzzer), mirroring the
-    pFMS scoring engine.
+    turning off — a shift change or the start of an operator pause — still
+    count (they were in flight), mirroring the pFMS scoring engine.
     """
     score = 0
     auto = 0
@@ -460,21 +460,27 @@ def tally_marks(marks: list[dict], spans: list[dict]) -> dict:
         t = m.get("video_time", 0)
         n = int(m.get("n_balls", 1))
         idx = next((i for i, s in enumerate(spans) if s["start"] <= t < s["end"]), None)
-        if idx is None or not spans[idx]["scoring"]:
+        if idx is None:
             excluded += n
             continue
         span = spans[idx]
-        if not span.get("active", True):
-            prev = spans[idx - 1] if idx > 0 else None
-            in_grace = (
-                t - span["start"] <= GOAL_GRACE_SEC
-                and prev is not None
-                and prev["scoring"]
-                and prev.get("active", True)
-            )
-            if not in_grace:
-                goal_inactive += n
-                continue
+        prev = spans[idx - 1] if idx > 0 else None
+        # Was the hub on for this goal just before this span, and did the
+        # span start recently enough for a ball to have been in the air?
+        prev_on = prev is not None and prev["scoring"] and prev.get("active", True)
+        in_grace = prev_on and t - span["start"] <= GOAL_GRACE_SEC
+        if not span["scoring"]:
+            if span["phase"] == "paused" and in_grace:
+                # Pause grace: the ball counts toward the period the pause interrupted
+                score += n
+                if prev["phase"] in AUTO_PHASES:
+                    auto += n
+            else:
+                excluded += n
+            continue
+        if not span.get("active", True) and not in_grace:
+            goal_inactive += n
+            continue
         score += n
         if span["phase"] in AUTO_PHASES:
             auto += n
