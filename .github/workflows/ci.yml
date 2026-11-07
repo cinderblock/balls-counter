@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          # Oldest version requires-python allows.
+          python-version: "3.11"
+
+      - name: Install (locked, with the web extra; the ml extra pulls in torch)
+        run: uv sync --locked --extra web
+
+      - name: Byte-compile
+        run: uv run python -m compileall -q src scripts
+
+      - name: Import every module
+        env:
+          PYTHONPATH: src
+        run: |
+          uv run python - <<'PY'
+          import importlib
+          import pkgutil
+
+          import ball_counter
+
+          mods = [
+              m.name
+              for m in pkgutil.walk_packages(ball_counter.__path__, "ball_counter.")
+              if not m.name.endswith("__main__")
+          ]
+          for name in mods:
+              importlib.import_module(name)
+          print(f"imported {len(mods)} modules")
+          PY
