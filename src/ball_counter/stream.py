@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -185,6 +186,9 @@ class GoalProcessor:
         self._crop_bounds: tuple[int, int, int, int] | None = None
         self._last_frame: np.ndarray | None = None
         self.buffer = RollingBuffer()
+        # (monotonic, wall) read time of recent frames, newest last — lets an
+        # event be dated to the frame the ball crossed on (~30 s at 30 fps)
+        self._frame_times: deque[tuple[float, float]] = deque(maxlen=900)
 
         if yolo_model_path is not None and config.roi_points:
             # YOLO takes priority over ML when both are specified
@@ -289,15 +293,21 @@ class GoalProcessor:
             self.yolo_detector.reset()
 
     def process(self, frame: np.ndarray, timestamp: str = "",
-                alignment_offset: tuple[float, float] | None = None) -> MotionEvent | None:
+                alignment_offset: tuple[float, float] | None = None,
+                mono: float | None = None, wall: float | None = None) -> MotionEvent | None:
         """Run motion counting on the crop region of the given frame.
 
         alignment_offset: (dx, dy) pixel drift from AprilTag tracking.
         When provided, the crop region is shifted to follow camera drift.
+        mono / wall: when this frame was read (time.monotonic() / time.time()).
+        Remembered per frame so an event can be pinned to the frame the ball
+        actually crossed on, which is a few frames before the detector fires.
         """
         if self.counter is None:
             return None
         self._last_frame = frame
+        if mono is not None:
+            self._frame_times.append((mono, wall if wall is not None else time.time()))
         x1, y1, x2, y2 = self._crop_bounds
 
         # Store for overlay drawing (don't shift crop — shift geometry instead)
@@ -333,6 +343,11 @@ class GoalProcessor:
         if event is not None:
             self.last_event = event
             self.score_flash = 20
+            # Time of the frame the ball crossed on: `lag_frames` back from
+            # this one. Clamp to the oldest time we remember.
+            if self._frame_times:
+                back = min(max(0, event.lag_frames), len(self._frame_times) - 1)
+                event.mono, event.wall = self._frame_times[-1 - back]
 
         # Feed rolling buffer with the raw (no overlay) full-resolution crop
         raw = frame[y1:y2, x1:x2]
@@ -736,6 +751,10 @@ class SourceProcessor:
     def process_frame(self) -> list[tuple[GoalProcessor, MotionEvent | None]]:
         """Process the current frame through all goal counters."""
         ts = self.timestamp_str
+        # When this frame was read — the best available estimate of when it
+        # was captured (see pfms_capture_latency_ms for the rest).
+        mono = time.monotonic()
+        wall = time.time()
         self._frame_count += 1
 
         # GPU decode path: each goal already has its own crop — process in parallel
@@ -745,7 +764,7 @@ class SourceProcessor:
                 crop = self._gpu_crops[i]
                 if crop is None:
                     return (goal, None)
-                return (goal, goal.process(crop, ts, alignment_offset=None))
+                return (goal, goal.process(crop, ts, alignment_offset=None, mono=mono, wall=wall))
 
             futures = [self._executor.submit(_process_gpu, i)
                        for i in range(len(self.goals))]
@@ -768,7 +787,7 @@ class SourceProcessor:
         def _process_cpu(goal: GoalProcessor):
             offset = (self._alignment.goal_offset(goal.name)
                       if self._alignment and self._alignment.initialized else None)
-            return (goal, goal.process(self._frame, ts, alignment_offset=offset))
+            return (goal, goal.process(self._frame, ts, alignment_offset=offset, mono=mono, wall=wall))
 
         futures = [self._executor.submit(_process_cpu, g) for g in self.goals]
         return [f.result() for f in futures]

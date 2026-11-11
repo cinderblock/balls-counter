@@ -287,18 +287,33 @@ def run(args: argparse.Namespace) -> None:
     forwarder = None
     if pfms_cfg is not None:
         from ball_counter.pfms import PfmsForwarder
-        forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source)
-        print(f"pfms     - enabled -> {pfms_cfg.url}")
+        forwarder = PfmsForwarder(pfms_cfg.url, pfms_cfg.key, pfms_cfg.source,
+                                  capture_latency_ms=pfms_cfg.capture_latency_ms)
+        print(f"pfms     - enabled -> {pfms_cfg.url} "
+              f"(capture latency {pfms_cfg.capture_latency_ms} ms)")
+
+    clips_dir = config_path.parent / "clips"
+
+    # Match-scoped recording: follow PFMS match state and record every goal
+    # for the whole match, for human score review afterwards.
+    match_recorder = None
+    match_link = None
+    if pfms_cfg is not None:
+        from ball_counter.match import MatchRecorder, PfmsMatchLink
+        match_recorder = MatchRecorder(clips_dir / "matches")
+        match_link = PfmsMatchLink(pfms_cfg, match_recorder)
+        match_link.start()
+        print(f"match    - match recording armed (following {pfms_cfg.url})")
 
     if state is not None:
-        state.set_clips_dir(config_path.parent / "clips")
+        state.set_clips_dir(clips_dir)
+        if match_recorder is not None:
+            state.set_match_context(clips_dir / "matches", match_recorder, match_link)
         for proc in sources:
             for goal in proc.goals:
                 state.update_count(goal.name, 0)
                 state.register_buffer(goal.name, goal.buffer)
                 state.register_goal(goal.name, goal)
-
-    clips_dir = config_path.parent / "clips"
 
     # Auto-record short clips around detected events (live sources only)
     recorder = None
@@ -388,6 +403,12 @@ def run(args: argparse.Namespace) -> None:
                     if jpeg is not None:
                         state.update_frame(goal.name, jpeg)
 
+                # Feed the match recorder every frame while a match is running
+                if match_recorder is not None and match_recorder.active:
+                    bf = goal.buffer.latest()
+                    if bf is not None:
+                        match_recorder.on_frame(goal.name, bf)
+
                 if event:
                     print(f"score    - {goal.name}: +{event.n_balls} at {ts} (total: {goal.count})")
                     if state is not None:
@@ -397,7 +418,10 @@ def run(args: argparse.Namespace) -> None:
                                     else "blue" if "blue" in goal.name
                                     else None)
                         if alliance:
-                            forwarder.send(alliance, goal.config.pfms_element, event.n_balls)
+                            # Pin the score to the frame the ball crossed on,
+                            # not the (later) frame the detector fired on.
+                            forwarder.send(alliance, goal.config.pfms_element, event.n_balls,
+                                           occurred_mono=event.mono, occurred_wall=event.wall)
                         else:
                             print(f"pfms     - {goal.name}: cannot determine alliance")
 

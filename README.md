@@ -62,6 +62,65 @@ All streams are viewable via the web UI with real-time signal overlay and runnin
 uv run python -m ball_counter.calibrate path/to/video.mp4
 ```
 
+### Match recording & review (pFMS)
+
+When the config has a `pfms_url`, the counter follows the pFMS match state
+over its public WebSocket (`/ws/scores`) and records **every goal for the
+whole match** — countdown pre-roll, auto, pauses, teleop, endgame, and the
+post-match ball-count period. The phase timeline (including operator
+pauses) is stored with each recording, so reviewers can see exactly which
+video spans count toward the score.
+
+- `/matches` lists match recordings (a running match shows as LIVE)
+- `/match/<id>` is the per-match review page: pick the red or blue goal
+  (two reviewers can work in parallel), watch the cropped goal video with
+  the match periods shaded on the timeline, and mark each scored ball —
+  live during the match or after the fact. Marks during countdown or an
+  operator pause are automatically excluded from the tally.
+- **Submit final score to PFMS** reports the reviewed score (with the auto
+  portion split out) back to pFMS match history via `POST /api/match-review`
+  using the same `pfms_url`/`pfms_key` as live score forwarding.
+
+Config keys:
+
+```jsonc
+{
+  "pfms_url": "http://pfms.tsl",       // pFMS base URL
+  "pfms_key": "…",                     // API key (optional)
+  "public_url": "http://sentinel:8080", // this service's own URL — lets pFMS
+                                        // link its match history to /match/<id>
+  "pfms_capture_latency_ms": 0          // camera→decoder latency, see below
+}
+```
+
+Recordings are saved under `<config dir>/clips/matches/` as one MP4 + JSON
+sidecar per goal plus a `<match id>.match.json` metadata file.
+
+### Score timing
+
+pFMS judges every score at the moment the ball actually scored — auto vs
+teleop, which shift, whether that alliance's goal was on. The detector
+only sees a ball some time after it crossed (decoder latency, then the
+signal has to peak and fall again before the threshold detector fires;
+a retry after a network blip adds more). So every score sent to pFMS
+carries `ageMs`: how long before the request was sent the ball crossed,
+recomputed at each send attempt from the frame's monotonic read time.
+pFMS subtracts it from its own receive time, so the two machines' clocks
+never need to agree and a late report still lands in the right period.
+
+What the counter can't see is the time between the camera capturing a
+frame and Python reading it. Set `pfms_capture_latency_ms` to cover it
+(default 0). To measure: point the camera at a stopwatch or a phone
+showing milliseconds, compare the time shown in a frame with the
+counter's frame read time (the `/live` page timestamp or the event log),
+and take the typical difference.
+
+The forwarder queues scores and posts them from one worker: a burst of
+balls goes out as one request, and a failed request is retried with
+backoff (1 s → 30 s) instead of the score being lost. Scores older than
+ten minutes are dropped. Each log line shows where pFMS filed the score
+(`red +1 (0.42s old -> shift1)`) and whether it counted.
+
 ### Field zone counter
 
 Count total balls in 3 field zones (red/middle/blue) from a stitched overhead RTSP stream:
@@ -84,24 +143,30 @@ uv run python scripts/live_field_count.py  # live view
 
 ## Running as a systemd service
 
+Runs as a **user** service (no root needed). Requires `ffmpeg` on the host for
+GPU (NVDEC) decode — install it with your package manager (e.g. `sudo apt install ffmpeg`).
+
 Install and enable the service:
 
 ```bash
-sudo cp balls-counter.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now balls-counter
+mkdir -p ~/.config/systemd/user
+cp balls-counter.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now balls-counter
+# run at boot without an active login session:
+sudo loginctl enable-linger "$USER"
 ```
 
 Edit [balls-counter.env](balls-counter.env) to change settings (config path, web port, YOLO model), then restart:
 
 ```bash
-sudo systemctl restart balls-counter
+systemctl --user restart balls-counter
 ```
 
 View logs:
 
 ```bash
-journalctl -u balls-counter -f
+journalctl --user -u balls-counter -f
 ```
 
 ## Architecture
@@ -112,6 +177,11 @@ src/ball_counter/
   counter.py    - MotionCounter (line band + ROI ring modes)
   config.py     - Per-stream JSON configuration
   stream.py     - StreamProcessor (wraps MotionCounter + video capture)
+  buffer.py     - Rolling per-goal frame buffer (feeds clips + recordings)
+  clips.py      - Clip saving/trimming (MP4 + JSON sidecar)
+  match.py      - pFMS match-scoped recording + review score report-back
+  pfms.py       - Live score forwarding to pFMS
+  web.py        - HTTP API + web UIs (live, clips review, match review, wizard)
   main.py       - Multi-stream runner with tiled display
   calibrate.py  - Interactive HSV calibration
 ```
